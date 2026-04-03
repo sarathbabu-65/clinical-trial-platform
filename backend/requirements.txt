@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pydantic
+faker
+python-docx
+fastapi-cors
