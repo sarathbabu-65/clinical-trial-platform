@@ -239,13 +239,14 @@ async def parse_protocol(file: UploadFile = File(...)):
         for page in pdf_reader.pages:
             extracted_text += page.extract_text()
             
-        # 2. Initialize the Gemini Model 
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 2. Initialize the Gemini Model (Updated to the current active model version)
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # 3. Prompt Engineering: Force the LLM to output our exact schema
+        # 3. Prompt Engineering
         prompt = f"""
         You are an expert clinical trial data extraction AI. 
         Read the following clinical trial protocol text and extract the key parameters into a strict JSON format.
+        DO NOT include markdown formatting like ```json. Return ONLY the raw JSON object.
         
         Required JSON structure:
         {{
@@ -271,7 +272,6 @@ async def parse_protocol(file: UploadFile = File(...)):
         {extracted_text}
         """
         
-        # 4. Call the LLM, enforcing a JSON response type
         response = model.generate_content(
             prompt,
             generation_config=genai.GenerationConfig(
@@ -279,20 +279,24 @@ async def parse_protocol(file: UploadFile = File(...)):
             )
         )
         
-        # 5. Parse the LLM's JSON string into a Python dictionary
-        structured_data = json.loads(response.text)
+        # 4. ROBUST JSON PARSING: Strip markdown backticks if Gemini accidentally includes them
+        raw_response = response.text.strip()
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:]
+        if raw_response.endswith("```"):
+            raw_response = raw_response[:-3]
+            
+        structured_data = json.loads(raw_response.strip())
         
-        # Add a tag to the title to prove the AI processed it
         structured_data["title"] = f"[AI Extracted: {file.filename}] " + structured_data.get("title", "Unknown Title")
         
-        # Fallback geographies if LLM misses them to ensure the demo always works
         if not structured_data.get("geographies"):
              structured_data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
              
         return structured_data
 
     except Exception as e:
-        print(f"LLM Parsing Error: {e}")
+        print(f"LLM Parsing Error: {str(e)}") # This prints to Render Logs
         raise HTTPException(status_code=400, detail=f"Error parsing PDF with LLM: {str(e)}")
 
 @app.post("/participants/filter")
