@@ -14,13 +14,18 @@ export default function Home() {
   const [selectedSites, setSelectedSites] = useState<string[]>([]);
   const [patientDistribution, setPatientDistribution] = useState<Record<string, number>>({});
   const [simulation, setSimulation] = useState<any>(null);
+  
+  // Loading & Error States
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isRanking, setIsRanking] = useState(false);
+  const [isSimulating, setIsSimulating] = useState(false);
   
   // UI State
   const [expandedSite, setExpandedSite] = useState<string | null>(null);
   const [docTypes, setDocTypes] = useState<string[]>(["FDA_1572"]);
 
+  // LOCKED PRODUCTION API URL
   const API_BASE = "https://clinical-trial-api-j45u.onrender.com";
 
   // --- MAP CONFIGURATION ---
@@ -35,7 +40,6 @@ export default function Home() {
     "NC": [-79.0193, 35.7596], "DC": [-77.0369, 38.9072]
   };
 
-  // --- NAVIGATION MAP ---
   const navItems = [
     { id: "protocol", label: "1. Protocol Setup", disabled: false },
     { id: "sites", label: "2. Site Selection", disabled: !protocol },
@@ -59,7 +63,6 @@ export default function Home() {
     );
   };
 
-  // --- API CALL: Upload & Parse PDF ---
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -78,25 +81,21 @@ export default function Home() {
       if (!res.ok) throw new Error("Connection failed. Is the backend running?");
       
       const data = await res.json();
-
-      // Empty Protocol Data Validation
       if (!data.title || data.title.includes("UNKNOWN") || !data.indication) {
         throw new Error("No protocol data found. Please ensure the uploaded file is a valid clinical trial protocol.");
       }
 
       setProtocol(data);
     } catch (error: any) {
-      console.error(error);
       setUploadError(error.message || "An error occurred while parsing the document.");
     } finally {
       setUploading(false);
     }
   };
 
-  // --- API CALL: Rank Sites & Filter Patients (Feasibility) ---
   const handleRank = async () => {
+    setIsRanking(true);
     try {
-      // 1. Get Ranked Sites
       const resSites = await fetch(`${API_BASE}/sites/rank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -105,7 +104,6 @@ export default function Home() {
       const dataSites = await resSites.json();
       setSites(dataSites.top_sites);
 
-      // 2. Get Patient Feasibility Heatmap Data
       const resPatients = await fetch(`${API_BASE}/participants/filter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -115,13 +113,14 @@ export default function Home() {
       setPatientDistribution(dataPatients.distribution_by_state || {});
 
     } catch (error) {
-      console.error(error);
       alert("Error ranking sites and fetching patient data.");
+    } finally {
+      setIsRanking(false);
     }
   };
 
-  // --- API CALL: Simulate ---
   const handleSimulate = async () => {
+    setIsSimulating(true);
     try {
       const res = await fetch(`${API_BASE}/enrollment/simulate`, {
         method: "POST",
@@ -131,12 +130,12 @@ export default function Home() {
       const data = await res.json();
       setSimulation(data);
     } catch (error) {
-      console.error(error);
       alert("Error running simulation.");
+    } finally {
+      setIsSimulating(false);
     }
   };
 
-  // --- API CALL: Download Docs ---
   const handleDownload = async () => {
     try {
       const res = await fetch(`${API_BASE}/documents/generate`, {
@@ -144,9 +143,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol, selected_site_ids: selectedSites, doc_types: docTypes })
       });
-      
       if (!res.ok) throw new Error("Failed to generate documents");
-
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -154,7 +151,6 @@ export default function Home() {
       a.download = `Activation_Docs.zip`;
       a.click();
     } catch (error) {
-      console.error(error);
       alert("Error generating documents.");
     }
   };
@@ -199,16 +195,10 @@ export default function Home() {
             <p className="text-gray-600 mb-8">Upload a PDF protocol to automatically extract structured criteria.</p>
             
             <div className="border-2 border-dashed border-gray-300 rounded-lg p-12 text-center bg-gray-50 hover:bg-gray-100 transition">
-              <input 
-                type="file" 
-                accept="application/pdf"
-                onChange={handleFileUpload} 
-                className="hidden" 
-                id="file-upload" 
-              />
+              <input type="file" accept="application/pdf" onChange={handleFileUpload} className="hidden" id="file-upload" />
               <label htmlFor="file-upload" className="cursor-pointer">
                 <span className="bg-blue-600 text-white px-6 py-3 rounded font-medium shadow hover:bg-blue-700 transition">
-                  {uploading ? "Analyzing via AI..." : "Browse PDF Files"}
+                  {uploading ? "Analyzing via Gemini AI..." : "Browse PDF Files"}
                 </span>
               </label>
             </div>
@@ -228,7 +218,6 @@ export default function Home() {
                   <div><strong>Target:</strong> {protocol.target_enrollment} participants</div>
                   <div><strong>Phase:</strong> {protocol.phase}</div>
                 </div>
-                
                 <div className="mt-6 flex justify-end">
                     <button onClick={() => navigate('next')} className="bg-green-700 text-white px-6 py-2 rounded font-medium shadow hover:bg-green-800 transition">
                         Proceed to Site Selection →
@@ -247,24 +236,29 @@ export default function Home() {
                 <h2 className="text-2xl font-semibold">AI Site Selection & Feasibility</h2>
                 <p className="text-gray-600">Map eligible patient density and rank site infrastructure.</p>
               </div>
-              <button onClick={handleRank} className="bg-indigo-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition">
-                Run Feasibility Engine
+              <button 
+                onClick={handleRank} 
+                disabled={isRanking}
+                className="bg-indigo-600 disabled:bg-indigo-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition flex items-center"
+              >
+                {isRanking ? "Processing..." : "Run Feasibility Engine"}
               </button>
             </div>
 
-            {sites.length > 0 && (
+            {/* LOADING STATE UI */}
+            {isRanking ? (
+              <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
+                 <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-indigo-600 mb-6"></div>
+                 <h3 className="text-xl font-bold text-indigo-900 mb-2">Generative AI is Evaluating Sites</h3>
+                 <p className="text-gray-500 max-w-md">Gemini LLM is cross-referencing protocol indication <strong>"{protocol?.indication || 'the indication'}"</strong> against site therapeutic metadata and querying the synthetic patient database...</p>
+              </div>
+            ) : sites.length > 0 && (
               <>
                 <div className="grid grid-cols-3 gap-6 mb-8">
                   <div className="col-span-2 bg-white rounded shadow-sm border p-4 flex flex-col items-center">
                     <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap</h3>
                     <div className="w-full flex justify-center items-center overflow-hidden bg-white">
-                      {/* FIX: Added width/height and responsive styling to contain the SVG */}
-                      <ComposableMap 
-                        projection="geoAlbersUsa" 
-                        width={800} 
-                        height={450} 
-                        style={{ width: "100%", height: "auto", maxHeight: "400px" }}
-                      >
+                      <ComposableMap projection="geoAlbersUsa" width={800} height={450} style={{ width: "100%", height: "auto", maxHeight: "400px" }}>
                         <Geographies geography={geoUrl}>
                           {({ geographies }) =>
                             geographies.map((geo) => {
@@ -341,7 +335,6 @@ export default function Home() {
                             <td className="p-4">{s.site.metrics.past_enrollment_rate}/mo</td>
                           </tr>
                           
-                          {/* FIX: Restored the Explainability UI */}
                           {expandedSite === s.site.site_id && (
                             <tr className="bg-indigo-50 border-b">
                                 <td colSpan={6} className="p-6">
@@ -391,14 +384,25 @@ export default function Home() {
             <h2 className="text-2xl font-semibold mb-2">Enrollment Simulation</h2>
             
             <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6 text-sm text-blue-800 shadow-sm">
-              <strong>Understanding the Model:</strong> This simulation applies real-world CMS behavioral patterns.
+              <strong>Understanding the Model:</strong> This simulation feeds the selected site metadata directly into Gemini to predict non-linear ramp-up times and behavioral enrollment drops.
             </div>
 
-            <button onClick={handleSimulate} className="bg-emerald-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 mb-8 transition">
-              Run CMS-Pattern Simulation
+            <button 
+              onClick={handleSimulate} 
+              disabled={isSimulating}
+              className="bg-emerald-600 disabled:bg-emerald-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 mb-8 transition flex items-center"
+            >
+              {isSimulating ? "Simulating Timeline..." : "Run CMS-Pattern Simulation"}
             </button>
 
-            {simulation && (
+            {/* LOADING STATE UI */}
+            {isSimulating ? (
+              <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
+                 <div className="animate-pulse rounded-full h-12 w-12 bg-emerald-500 mb-6"></div>
+                 <h3 className="text-xl font-bold text-emerald-900 mb-2">Generating Predictive Timeline</h3>
+                 <p className="text-gray-500 max-w-md">Factoring in site activation delays, non-linear enrollment ramp-up, and localized real-world friction...</p>
+              </div>
+            ) : simulation && (
               <div className="bg-white p-6 rounded shadow-sm border">
                 <div className="flex gap-12 mb-8">
                   <div>
@@ -407,6 +411,17 @@ export default function Home() {
                   </div>
                 </div>
                 
+                <h4 className="font-bold text-gray-700 mb-4 border-b pb-2">Cumulative Timeline Projection</h4>
+                <div className="flex gap-2 overflow-x-auto pb-4">
+                  {simulation.timeline?.map((t: any) => (
+                    <div key={t.month} className="bg-gray-50 p-4 rounded text-center min-w-[120px] border border-gray-200 shadow-sm">
+                      <div className="text-xs text-gray-500 font-bold uppercase mb-1">Month {t.month}</div>
+                      <div className="text-2xl font-black text-gray-800">{t.cumulative_enrolled}</div>
+                      <div className="text-xs text-emerald-600 mt-1 font-medium">+{t.monthly_enrolled} new</div>
+                    </div>
+                  ))}
+                </div>
+
                 <div className="mt-8 flex justify-between border-t pt-6">
                     <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Sites</button>
                     <button onClick={() => navigate('next')} className="bg-emerald-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 transition">
@@ -424,6 +439,32 @@ export default function Home() {
             <h2 className="text-2xl font-semibold mb-4">Activation Workflow Automation</h2>
             <p className="text-gray-600 mb-8">Generate finalized artifacts bundled in a .zip archive.</p>
             
+            <div className="space-y-4 mb-8 bg-gray-50 p-6 rounded border">
+              <label className="flex items-center space-x-3 cursor-pointer">
+                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
+                  checked={docTypes.includes("FDA_1572")} 
+                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "FDA_1572"] : prev.filter(d => d !== "FDA_1572"))} 
+                />
+                <span className="font-medium">FDA Form 1572 (Statement of Investigator)</span>
+              </label>
+              
+              <label className="flex items-center space-x-3 cursor-pointer">
+                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
+                  checked={docTypes.includes("CDA")} 
+                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "CDA"] : prev.filter(d => d !== "CDA"))} 
+                />
+                <span className="font-medium">Confidential Disclosure Agreement (CDA)</span>
+              </label>
+              
+              <label className="flex items-center space-x-3 cursor-pointer">
+                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
+                  checked={docTypes.includes("PROTOCOL_SIGNATURE")} 
+                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "PROTOCOL_SIGNATURE"] : prev.filter(d => d !== "PROTOCOL_SIGNATURE"))} 
+                />
+                <span className="font-medium">Protocol Signature Page</span>
+              </label>
+            </div>
+
             <button onClick={handleDownload} disabled={docTypes.length === 0} className="w-full bg-purple-600 disabled:bg-gray-400 text-white px-6 py-4 rounded font-bold hover:bg-purple-700 transition shadow">
               Generate & Download Documents (.zip)
             </button>
