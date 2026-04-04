@@ -228,15 +228,17 @@ async def parse_protocol(file: UploadFile = File(...)):
         if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
 
         pdf_reader = PyPDF2.PdfReader(file.file)
-        # Groq has a context limit; safe to extract first ~15,000 characters for protocol metadata
         extracted_text = "".join([page.extract_text() for page in pdf_reader.pages])[:15000]
             
         system_prompt = """
         You are an expert clinical trial data extraction AI. 
-        Read the provided protocol text and extract key parameters into strict JSON.
+        First, determine if the provided text is genuinely a Clinical Trial Protocol.
+        If it is a patient record, medical certificate, academic paper, case study, or general medical text, it is NOT a clinical trial protocol.
         
         Required JSON structure:
         {
+            "is_valid_protocol": <boolean: true if it is a protocol, false otherwise>,
+            "rejection_reason": "<string: if false, explain why this document is not a protocol>",
             "protocol_id": "Generate a random ID like P-102",
             "nct_id": "Extract NCT ID or use 'UNKNOWN'",
             "title": "Extract full study title",
@@ -266,6 +268,12 @@ async def parse_protocol(file: UploadFile = File(...)):
         )
         
         structured_data = json.loads(chat_completion.choices[0].message.content)
+
+        # --- STRICT VALIDATION GATE ---
+        if structured_data.get("is_valid_protocol") is False:
+            reason = structured_data.get("rejection_reason", "The uploaded document does not appear to be a valid clinical trial protocol.")
+            raise ValueError(reason) # Triggers the catch block
+            
         structured_data["title"] = f"[Groq Extracted] {structured_data.get('title', 'Unknown Title')}"
         
         if not structured_data.get("geographies"):
@@ -273,9 +281,13 @@ async def parse_protocol(file: UploadFile = File(...)):
              
         return structured_data
 
+    except ValueError as ve:
+        # Catch our deliberate validation rejection
+        print(f"Document Rejected by AI: {str(ve)}")
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         print(f"Parsing Error: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Error parsing document: {str(e)}")
 
 @app.post("/participants/filter")
 async def filter_participants(req: FilterRequest):
@@ -294,13 +306,12 @@ async def filter_participants(req: FilterRequest):
         pt_conditions = set([c.lower() for c in pt["conditions"]])
         req_conditions = set([c.lower() for c in criteria.conditions_required])
         
-        # Less strict intersection matching for real-world strings
         if req_conditions and not any(req_cond in pt_cond for pt_cond in pt_conditions for req_cond in req_conditions): continue
             
         eligible_patients.append(pt)
         if pt_state in site_counts: site_counts[pt_state] += 1
 
-    # DEMO SAFEGUARD: Ensure the heatmap always looks impressive
+    # DEMO SAFEGUARD
     if len(eligible_patients) < 50:
         print("DEMO SAFEGUARD TRIGGERED: Injecting realistic feasibility data.")
         fallback_pool = [p for p in db_patients if p["location"]["state"] in req.protocol.geographies]
@@ -328,7 +339,7 @@ async def rank_sites(req: SiteRankingRequest):
                 "specialties": s["therapeutic_areas"],
                 "enrollment_rate": s["metrics"]["past_enrollment_rate"],
                 "pool_size": s["metrics"]["patient_pool_size"]
-            } for s in db_sites[:40] # Analyze top 40 synthetic sites to keep context tight
+            } for s in db_sites[:40] 
         ]
 
         system_prompt = """
@@ -354,9 +365,7 @@ async def rank_sites(req: SiteRankingRequest):
         user_prompt = f"""
         Protocol Target Indication: "{req.protocol.indication}"
         Target Geographies: {req.protocol.geographies}
-        
-        Available Sites Metadata:
-        {json.dumps(compressed_sites)}
+        Available Sites Metadata: {json.dumps(compressed_sites)}
         
         Task: Analyze the Available Sites and select the top 15 optimal sites.
         1. Heavily weight sites where their "specialties" match or are relevant to the "Indication".
@@ -427,10 +436,9 @@ async def simulate_enrollment(req: SimulationRequest):
         {json.dumps(compressed_sites)}
         
         Task: Simulate a realistic month-by-month enrollment timeline.
-        - Important: Look at the 'activation_days' for each site. Sites with 45+ activation days will NOT enroll anyone in Month 1.
-        - Apply a "ramp-up" curve: sites enroll slower in their first active month.
-        - Apply random real-world variances.
-        - Keep generating month objects until the 'cumulative_enrolled' meets or exceeds the Target. Capped at 60 months max.
+        - Look at 'activation_days'. Sites with 45+ activation days will NOT enroll anyone in Month 1.
+        - Apply a ramp-up curve and real-world variances.
+        - Keep generating month objects until 'cumulative_enrolled' meets or exceeds the Target. Capped at 60 months max.
         """
 
         chat_completion = client.chat.completions.create(

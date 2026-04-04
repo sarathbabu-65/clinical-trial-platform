@@ -78,7 +78,11 @@ export default function Home() {
         body: formData,
       });
       
-      if (!res.ok) throw new Error("Connection failed. Is the backend running?");
+      // If backend throws a 400 Validation Error, extract the exact LLM reason
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Connection failed. Is the backend running?");
+      }
       
       const data = await res.json();
       if (!data.title || data.title.includes("UNKNOWN") || !data.indication) {
@@ -205,7 +209,7 @@ export default function Home() {
 
             {uploadError && (
               <div className="mt-6 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 rounded shadow-sm">
-                <strong>Upload Failed: </strong> {uploadError}
+                <strong>AI Document Rejection: </strong> {uploadError}
               </div>
             )}
 
@@ -245,7 +249,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* LOADING STATE UI */}
             {isRanking ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
                  <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-orange-500 mb-6"></div>
@@ -395,7 +398,6 @@ export default function Home() {
               {isSimulating ? "Simulating Timeline..." : "Run CMS-Pattern Simulation"}
             </button>
 
-            {/* LOADING STATE UI */}
             {isSimulating ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
                  <div className="animate-pulse rounded-full h-12 w-12 bg-orange-500 mb-6"></div>
