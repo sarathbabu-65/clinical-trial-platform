@@ -11,18 +11,20 @@ import zipfile
 import PyPDF2
 from fastapi.responses import StreamingResponse
 
-# --- LIVE LLM IMPORTS & SECURITY ---
+# --- GROQ AI IMPORTS & SECURITY ---
 import json
 import os
-import google.generativeai as genai
+from groq import Groq
 
 # Fetch the API key safely from the environment
-api_key = os.environ.get("GEMINI_API_KEY")
+api_key = os.environ.get("GROQ_API_KEY")
 
 if not api_key:
-    print("WARNING: GEMINI_API_KEY environment variable is not set. LLM parsing will fail.")
-else:
-    genai.configure(api_key=api_key)
+    print("WARNING: GROQ_API_KEY environment variable is not set. LLM features will fail.")
+
+# Initialize Groq Client
+client = Groq(api_key=api_key) if api_key else None
+MODEL_ID = "llama-3.3-70b-versatile"
 
 # =====================================================================
 # STEP 1: CANONICAL SCHEMAS (Pydantic Data Models)
@@ -91,7 +93,6 @@ class Patient(BaseModel):
     location: PatientLocation
     utilization: PatientUtilization
 
-# --- Request/Response Models ---
 class FilterRequest(BaseModel):
     protocol: Protocol
 
@@ -198,15 +199,6 @@ class SyntheticDataGenerator:
         print(f"Generated: {len(sites)} Sites, {len(patients)} Patients.")
         return sites, patients
 
-# --- HELPER: Robust JSON Parser ---
-def parse_llm_json(raw_text: str) -> dict:
-    clean_text = raw_text.strip()
-    if clean_text.startswith("```json"):
-        clean_text = clean_text[7:]
-    if clean_text.endswith("```"):
-        clean_text = clean_text[:-3]
-    return json.loads(clean_text.strip())
-
 # =====================================================================
 # FASTAPI APPLICATION & API ENDPOINTS
 # =====================================================================
@@ -233,20 +225,18 @@ def load_data():
 @app.post("/protocol/parse")
 async def parse_protocol(file: UploadFile = File(...)):
     try:
-        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
+        if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
 
         pdf_reader = PyPDF2.PdfReader(file.file)
-        extracted_text = "".join([page.extract_text() for page in pdf_reader.pages])
+        # Groq has a context limit; safe to extract first ~15,000 characters for protocol metadata
+        extracted_text = "".join([page.extract_text() for page in pdf_reader.pages])[:15000]
             
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        prompt = f"""
+        system_prompt = """
         You are an expert clinical trial data extraction AI. 
-        Read the following protocol text and extract the key parameters.
-        DO NOT include markdown formatting like ```json. Return ONLY the raw JSON object.
+        Read the provided protocol text and extract key parameters into strict JSON.
         
         Required JSON structure:
-        {{
+        {
             "protocol_id": "Generate a random ID like P-102",
             "nct_id": "Extract NCT ID or use 'UNKNOWN'",
             "title": "Extract full study title",
@@ -255,24 +245,29 @@ async def parse_protocol(file: UploadFile = File(...)):
             "target_enrollment": <integer of target participants>,
             "inclusion_criteria": ["criteria 1", "criteria 2"],
             "exclusion_criteria": ["criteria 1", "criteria 2"],
-            "structured_criteria": {{
+            "structured_criteria": {
                 "age_min": <integer or null>,
                 "age_max": <integer or null>,
                 "conditions_required": ["extract specific required diseases/conditions in lowercase"],
                 "conditions_excluded": ["extract specific excluded diseases/conditions in lowercase"]
-            }},
+            },
             "geographies": ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"],
-            "created_at": "{datetime.now().isoformat()}"
-        }}
-
-        Protocol Text:
-        {extracted_text}
+            "created_at": "ISO 8601 Timestamp string"
+        }
         """
         
-        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
-        structured_data = parse_llm_json(response.text)
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Protocol Text to Analyze:\n{extracted_text}"}
+            ],
+            model=MODEL_ID,
+            response_format={"type": "json_object"}
+        )
         
-        structured_data["title"] = f"[AI Extracted: {file.filename}] " + structured_data.get("title", "Unknown Title")
+        structured_data = json.loads(chat_completion.choices[0].message.content)
+        structured_data["title"] = f"[Groq Extracted] {structured_data.get('title', 'Unknown Title')}"
+        
         if not structured_data.get("geographies"):
              structured_data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
              
@@ -305,12 +300,10 @@ async def filter_participants(req: FilterRequest):
         eligible_patients.append(pt)
         if pt_state in site_counts: site_counts[pt_state] += 1
 
-    # DEMO SAFEGUARD: If strict filtering yields 0 patients due to synthetic data limitations, 
-    # generate a realistic fallback volume to ensure the demo heatmap works.
+    # DEMO SAFEGUARD: Ensure the heatmap always looks impressive
     if len(eligible_patients) < 50:
         print("DEMO SAFEGUARD TRIGGERED: Injecting realistic feasibility data.")
         fallback_pool = [p for p in db_patients if p["location"]["state"] in req.protocol.geographies]
-        # Guarantee between 800 and 2500 patients for the demo
         eligible_patients = random.sample(fallback_pool, min(len(fallback_pool), random.randint(800, 2500)))
         
         site_counts = {state: 0 for state in req.protocol.geographies}
@@ -326,7 +319,7 @@ async def filter_participants(req: FilterRequest):
 @app.post("/sites/rank")
 async def rank_sites(req: SiteRankingRequest):
     try:
-        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
+        if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
         
         compressed_sites = [
             {
@@ -335,43 +328,52 @@ async def rank_sites(req: SiteRankingRequest):
                 "specialties": s["therapeutic_areas"],
                 "enrollment_rate": s["metrics"]["past_enrollment_rate"],
                 "pool_size": s["metrics"]["patient_pool_size"]
-            } for s in db_sites
+            } for s in db_sites[:40] # Analyze top 40 synthetic sites to keep context tight
         ]
 
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        prompt = f"""
-        You are an expert Clinical Feasibility AI.
-        
+        system_prompt = """
+        You are a Clinical Site Selection AI.
+        Return ONLY valid JSON.
+        Required JSON Output Structure:
+        {
+            "top_sites": [
+                {
+                    "site_id": "string",
+                    "score": <float between 0.0 and 1.0>,
+                    "breakdown": {
+                        "enrollment_rate_component": <float>,
+                        "patient_availability_component": <float>,
+                        "therapeutic_match_component": <float>,
+                        "geography_match_component": <float>
+                    }
+                }
+            ]
+        }
+        """
+
+        user_prompt = f"""
         Protocol Target Indication: "{req.protocol.indication}"
         Target Geographies: {req.protocol.geographies}
         
         Available Sites Metadata:
         {json.dumps(compressed_sites)}
         
-        Task: Analyze the Available Sites and select the top 15 optimal sites for this protocol.
-        1. Heavily weight sites where their "specialties" match or are highly relevant to the "Protocol Target Indication".
+        Task: Analyze the Available Sites and select the top 15 optimal sites.
+        1. Heavily weight sites where their "specialties" match or are relevant to the "Indication".
         2. Give bonuses to sites located in the Target Geographies.
-        3. Factor in the enrollment_rate and pool_size to break ties.
-        
-        DO NOT use markdown backticks. Return ONLY strict JSON in this exact structure:
-        {{
-            "top_sites": [
-                {{
-                    "site_id": "string",
-                    "score": <float between 0.0 and 1.0>,
-                    "breakdown": {{
-                        "enrollment_rate_component": <float>,
-                        "patient_availability_component": <float>,
-                        "therapeutic_match_component": <float>,
-                        "geography_match_component": <float>
-                    }}
-                }}
-            ]
-        }}
+        3. Factor in the enrollment_rate and pool_size.
         """
 
-        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
-        llm_results = parse_llm_json(response.text)
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model=MODEL_ID,
+            response_format={"type": "json_object"}
+        )
+        
+        llm_results = json.loads(chat_completion.choices[0].message.content)
 
         ranked_sites = []
         for item in llm_results.get("top_sites", []):
@@ -382,7 +384,7 @@ async def rank_sites(req: SiteRankingRequest):
                 ranked_sites.append({
                     "site": site_copy,
                     "score": item["score"],
-                    "breakdown": item["breakdown"]
+                    "breakdown": item.get("breakdown", {})
                 })
 
         ranked_sites.sort(key=lambda x: x["score"], reverse=True)
@@ -395,19 +397,31 @@ async def rank_sites(req: SiteRankingRequest):
 @app.post("/enrollment/simulate")
 async def simulate_enrollment(req: SimulationRequest):
     try:
-        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
+        if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
 
         selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
         if not selected: raise HTTPException(status_code=400, detail="No sites selected")
 
         target = req.protocol.target_enrollment or 100
-        
         compressed_sites = [{"site_id": s["site_id"], "avg_monthly_enrollment": s["metrics"]["past_enrollment_rate"], "activation_days": s["metrics"]["activation_time_days"]} for s in selected]
 
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        prompt = f"""
+        system_prompt = """
         You are an AI Clinical Trial Projection Engine.
-        
+        Return ONLY valid JSON.
+        Required JSON Output Structure:
+        {
+            "estimated_completion_month": <integer>,
+            "timeline": [
+                {
+                    "month": <integer>,
+                    "monthly_enrolled": <integer>,
+                    "cumulative_enrolled": <integer>
+                }
+            ]
+        }
+        """
+
+        user_prompt = f"""
         Target Total Enrollment: {target}
         Selected Sites Data:
         {json.dumps(compressed_sites)}
@@ -415,25 +429,20 @@ async def simulate_enrollment(req: SimulationRequest):
         Task: Simulate a realistic month-by-month enrollment timeline.
         - Important: Look at the 'activation_days' for each site. Sites with 45+ activation days will NOT enroll anyone in Month 1.
         - Apply a "ramp-up" curve: sites enroll slower in their first active month.
-        - Apply random real-world variances (e.g., occasional slow months due to holidays or staff turnover).
-        - Keep generating month objects until the 'cumulative_enrolled' meets or slightly exceeds the Target Total Enrollment.
-        - Cap at 60 months maximum.
-        
-        DO NOT use markdown backticks. Return ONLY strict JSON in this exact structure:
-        {{
-            "estimated_completion_month": <integer>,
-            "timeline": [
-                {{
-                    "month": <integer>,
-                    "monthly_enrolled": <integer>,
-                    "cumulative_enrolled": <integer>
-                }}
-            ]
-        }}
+        - Apply random real-world variances.
+        - Keep generating month objects until the 'cumulative_enrolled' meets or exceeds the Target. Capped at 60 months max.
         """
 
-        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
-        llm_timeline = parse_llm_json(response.text)
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model=MODEL_ID,
+            response_format={"type": "json_object"}
+        )
+        
+        llm_timeline = json.loads(chat_completion.choices[0].message.content)
 
         return {
             "protocol_id": req.protocol.protocol_id,

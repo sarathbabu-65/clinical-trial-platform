@@ -198,7 +198,7 @@ export default function Home() {
               <input type="file" accept="application/pdf" onChange={handleFileUpload} className="hidden" id="file-upload" />
               <label htmlFor="file-upload" className="cursor-pointer">
                 <span className="bg-blue-600 text-white px-6 py-3 rounded font-medium shadow hover:bg-blue-700 transition">
-                  {uploading ? "Analyzing via Gemini AI..." : "Browse PDF Files"}
+                  {uploading ? "Analyzing via Groq AI..." : "Browse PDF Files"}
                 </span>
               </label>
             </div>
@@ -248,9 +248,9 @@ export default function Home() {
             {/* LOADING STATE UI */}
             {isRanking ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
-                 <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-indigo-600 mb-6"></div>
-                 <h3 className="text-xl font-bold text-indigo-900 mb-2">Generative AI is Evaluating Sites</h3>
-                 <p className="text-gray-500 max-w-md">Gemini LLM is cross-referencing protocol indication <strong>"{protocol?.indication || 'the indication'}"</strong> against site therapeutic metadata and querying the synthetic patient database...</p>
+                 <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-orange-500 mb-6"></div>
+                 <h3 className="text-xl font-bold text-orange-900 mb-2">Groq LPU Engine Processing</h3>
+                 <p className="text-gray-500 max-w-md">Llama 3.3 70B is cross-referencing protocol indication <strong>"{protocol?.indication || 'the indication'}"</strong> against site therapeutic metadata and querying the synthetic patient database...</p>
               </div>
             ) : sites.length > 0 && (
               <>
@@ -384,7 +384,7 @@ export default function Home() {
             <h2 className="text-2xl font-semibold mb-2">Enrollment Simulation</h2>
             
             <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6 text-sm text-blue-800 shadow-sm">
-              <strong>Understanding the Model:</strong> This simulation feeds the selected site metadata directly into Gemini to predict non-linear ramp-up times and behavioral enrollment drops.
+              <strong>Understanding the Model:</strong> This simulation feeds the selected site metadata directly into Groq LPU to predict non-linear ramp-up times and behavioral enrollment drops.
             </div>
 
             <button 
@@ -398,9 +398,9 @@ export default function Home() {
             {/* LOADING STATE UI */}
             {isSimulating ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
-                 <div className="animate-pulse rounded-full h-12 w-12 bg-emerald-500 mb-6"></div>
-                 <h3 className="text-xl font-bold text-emerald-900 mb-2">Generating Predictive Timeline</h3>
-                 <p className="text-gray-500 max-w-md">Factoring in site activation delays, non-linear enrollment ramp-up, and localized real-world friction...</p>
+                 <div className="animate-pulse rounded-full h-12 w-12 bg-orange-500 mb-6"></div>
+                 <h3 className="text-xl font-bold text-orange-900 mb-2">Generating Predictive Timeline</h3>
+                 <p className="text-gray-500 max-w-md">Llama 3.3 70B is factoring in site activation delays, non-linear enrollment ramp-up, and localized real-world friction...</p>
               </div>
             ) : simulation && (
               <div className="bg-white p-6 rounded shadow-sm border">
