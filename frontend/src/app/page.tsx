@@ -79,13 +79,12 @@ export default function Home() {
       
       const data = await res.json();
 
-      // CHANGE 1: Empty Protocol Data Validation
+      // Empty Protocol Data Validation
       if (!data.title || data.title.includes("UNKNOWN") || !data.indication) {
         throw new Error("No protocol data found. Please ensure the uploaded file is a valid clinical trial protocol.");
       }
 
       setProtocol(data);
-      // Removed auto-advance here to keep user on step 1
     } catch (error: any) {
       console.error(error);
       setUploadError(error.message || "An error occurred while parsing the document.");
@@ -160,7 +159,6 @@ export default function Home() {
     }
   };
 
-  // Ensure SSR doesn't break the map
   if (!mounted) return null;
 
   return (
@@ -231,7 +229,6 @@ export default function Home() {
                   <div><strong>Phase:</strong> {protocol.phase}</div>
                 </div>
                 
-                {/* CHANGE 2: Next Button */}
                 <div className="mt-6 flex justify-end">
                     <button onClick={() => navigate('next')} className="bg-green-700 text-white px-6 py-2 rounded font-medium shadow hover:bg-green-800 transition">
                         Proceed to Site Selection →
@@ -257,12 +254,17 @@ export default function Home() {
 
             {sites.length > 0 && (
               <>
-                {/* CHANGE 3: GEOSPATIAL MAP VIEW */}
                 <div className="grid grid-cols-3 gap-6 mb-8">
                   <div className="col-span-2 bg-white rounded shadow-sm border p-4 flex flex-col items-center">
                     <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap</h3>
-                    <div className="w-full max-w-xl h-64">
-                      <ComposableMap projection="geoAlbersUsa">
+                    <div className="w-full flex justify-center items-center overflow-hidden bg-white">
+                      {/* FIX: Added width/height and responsive styling to contain the SVG */}
+                      <ComposableMap 
+                        projection="geoAlbersUsa" 
+                        width={800} 
+                        height={450} 
+                        style={{ width: "100%", height: "auto", maxHeight: "400px" }}
+                      >
                         <Geographies geography={geoUrl}>
                           {({ geographies }) =>
                             geographies.map((geo) => {
@@ -271,25 +273,22 @@ export default function Home() {
                               const patientCount = stateAbbr ? (patientDistribution[stateAbbr] || 0) : 0;
                               const maxPatients = Math.max(...Object.values(patientDistribution), 1);
                               
-                              // Heatmap shading: darker blue = more patients
                               const opacity = patientCount > 0 ? 0.2 + (0.8 * (patientCount / maxPatients)) : 0;
                               const fill = patientCount > 0 ? `rgba(79, 70, 229, ${opacity})` : "#F3F4F6";
 
-                              return <Geography key={geo.rsmKey} geography={geo} fill={fill} stroke="#D1D5DB" />;
+                              return <Geography key={geo.rsmKey} geography={geo} fill={fill} stroke="#D1D5DB" strokeWidth={0.5} />;
                             })
                           }
                         </Geographies>
                         
-                        {/* Plot Selected Sites as Pins */}
                         {selectedSites.map(siteId => {
                            const site = sites.find(s => s.site.site_id === siteId)?.site;
                            if (!site || !stateCoords[site.location.state]) return null;
-                           // Add slight jitter so multiple pins in one state don't perfectly overlap
-                           const jitterX = (Math.random() - 0.5) * 1.5;
-                           const jitterY = (Math.random() - 0.5) * 1.5;
+                           const jitterX = (Math.random() - 0.5) * 2.0;
+                           const jitterY = (Math.random() - 0.5) * 2.0;
                            return (
                              <Marker key={siteId} coordinates={[stateCoords[site.location.state][0] + jitterX, stateCoords[site.location.state][1] + jitterY]}>
-                               <circle r={5} fill="#EF4444" stroke="#FFFFFF" strokeWidth={2} />
+                               <circle r={6} fill="#EF4444" stroke="#FFFFFF" strokeWidth={1.5} />
                              </Marker>
                            );
                         })}
@@ -341,10 +340,31 @@ export default function Home() {
                             <td className="p-4 font-bold text-green-600">{(s.score * 100).toFixed(0)}%</td>
                             <td className="p-4">{s.site.metrics.past_enrollment_rate}/mo</td>
                           </tr>
+                          
+                          {/* FIX: Restored the Explainability UI */}
                           {expandedSite === s.site.site_id && (
                             <tr className="bg-indigo-50 border-b">
                                 <td colSpan={6} className="p-6">
-                                    <p className="text-sm text-gray-700">Detailed AI matching parameters for {s.site.name} would be displayed here.</p>
+                                  <div className="grid grid-cols-2 gap-8 text-sm">
+                                    <div>
+                                      <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Score Explainability Breakdown</h4>
+                                      <ul className="space-y-1 text-gray-700 list-disc list-inside">
+                                        <li><strong>Historical Enrollment (40%):</strong> Site scored {(s.breakdown.enrollment_rate_component * 100).toFixed(1)}% due to their {s.site.metrics.past_enrollment_rate}/mo velocity.</li>
+                                        <li><strong>Patient Availability (30%):</strong> Site scored {(s.breakdown.patient_availability_component * 100).toFixed(1)}% based on a local pool of {s.site.metrics.patient_pool_size}.</li>
+                                        <li><strong>Therapeutic Match (20%):</strong> Site scored {(s.breakdown.therapeutic_match_component * 100).toFixed(1)}% for overlapping specialties.</li>
+                                        <li><strong>Geographic Match (10%):</strong> Site scored {(s.breakdown.geography_match_component * 100).toFixed(1)}% for operating in {s.site.location.state}.</li>
+                                      </ul>
+                                    </div>
+                                    <div>
+                                      <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Site Capabilities & Metadata</h4>
+                                      <div className="grid grid-cols-2 gap-2 text-gray-700">
+                                        <p><strong>NPI:</strong> {s.site.npi}</p>
+                                        <p><strong>Specialty:</strong> {s.site.specialty}</p>
+                                        <p><strong>Staff Count:</strong> {s.site.capabilities.staff_count}</p>
+                                        <p><strong>Avg Activation:</strong> {s.site.metrics.activation_time_days} days</p>
+                                      </div>
+                                    </div>
+                                  </div>
                                 </td>
                             </tr>
                           )}
@@ -354,7 +374,6 @@ export default function Home() {
                   </table>
                 </div>
 
-                {/* Workflow Navigation */}
                 <div className="mt-8 flex justify-between pt-6">
                     <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Protocol</button>
                     <button disabled={selectedSites.length === 0} onClick={() => navigate('next')} className="bg-indigo-600 disabled:bg-gray-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition">
@@ -388,7 +407,6 @@ export default function Home() {
                   </div>
                 </div>
                 
-                {/* Workflow Navigation */}
                 <div className="mt-8 flex justify-between border-t pt-6">
                     <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Sites</button>
                     <button onClick={() => navigate('next')} className="bg-emerald-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 transition">
@@ -410,7 +428,6 @@ export default function Home() {
               Generate & Download Documents (.zip)
             </button>
 
-            {/* Workflow Navigation */}
             <div className="mt-8 flex justify-between pt-6 border-t">
                 <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Simulation</button>
             </div>

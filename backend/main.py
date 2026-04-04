@@ -122,7 +122,6 @@ class SyntheticDataGenerator:
         self.org_types = ["hospital", "clinic", "academic medical center", "private practice"]
 
     def generate_sites(self, num_records=100) -> List[dict]:
-        """Generates 100 Sites based on NPI/CMS structure with Behavioral Realism"""
         sites = []
         for _ in range(num_records):
             is_high_performer = random.random() > 0.8 
@@ -164,7 +163,6 @@ class SyntheticDataGenerator:
         return sites
 
     def generate_patients(self, num_records=5000) -> List[dict]:
-        """Generates 5000 Patients based on Sentinel CDM structure"""
         patients = []
         for _ in range(num_records):
             age = int(random.gauss(60, 15))
@@ -201,6 +199,14 @@ class SyntheticDataGenerator:
         print(f"Generated: {len(sites)} Sites, {len(patients)} Patients.")
         return sites, patients
 
+# --- HELPER: Robust JSON Parser ---
+def parse_llm_json(raw_text: str) -> dict:
+    clean_text = raw_text.strip()
+    if clean_text.startswith("```json"):
+        clean_text = clean_text[7:]
+    if clean_text.endswith("```"):
+        clean_text = clean_text[:-3]
+    return json.loads(clean_text.strip())
 
 # =====================================================================
 # FASTAPI APPLICATION & API ENDPOINTS
@@ -216,7 +222,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-Memory Database
 db_sites = []
 db_patients = []
 
@@ -228,24 +233,17 @@ def load_data():
 
 @app.post("/protocol/parse")
 async def parse_protocol(file: UploadFile = File(...)):
-    """Reads uploaded PDF, extracts text, and uses Live Gemini LLM to structure JSON"""
     try:
-        if not api_key:
-             raise HTTPException(status_code=500, detail="Gemini API Key is not configured on the server.")
+        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
 
-        # 1. Extract text from the PDF
         pdf_reader = PyPDF2.PdfReader(file.file)
-        extracted_text = ""
-        for page in pdf_reader.pages:
-            extracted_text += page.extract_text()
+        extracted_text = "".join([page.extract_text() for page in pdf_reader.pages])
             
-        # 2. Initialize the Gemini Model (Updated to the current active model version)
         model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # 3. Prompt Engineering
         prompt = f"""
         You are an expert clinical trial data extraction AI. 
-        Read the following clinical trial protocol text and extract the key parameters into a strict JSON format.
+        Read the following protocol text and extract the key parameters.
         DO NOT include markdown formatting like ```json. Return ONLY the raw JSON object.
         
         Required JSON structure:
@@ -253,7 +251,7 @@ async def parse_protocol(file: UploadFile = File(...)):
             "protocol_id": "Generate a random ID like P-102",
             "nct_id": "Extract NCT ID or use 'UNKNOWN'",
             "title": "Extract full study title",
-            "indication": "Extract the primary disease or condition being studied in lowercase (e.g., hypertension, nsclc)",
+            "indication": "Extract the primary disease or condition being studied in lowercase",
             "phase": "Extract trial phase (e.g., 'Phase 3')",
             "target_enrollment": <integer of target participants>,
             "inclusion_criteria": ["criteria 1", "criteria 2"],
@@ -268,48 +266,32 @@ async def parse_protocol(file: UploadFile = File(...)):
             "created_at": "{datetime.now().isoformat()}"
         }}
 
-        Protocol Text to Analyze:
+        Protocol Text:
         {extracted_text}
         """
         
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-            )
-        )
-        
-        # 4. ROBUST JSON PARSING: Strip markdown backticks if Gemini accidentally includes them
-        raw_response = response.text.strip()
-        if raw_response.startswith("```json"):
-            raw_response = raw_response[7:]
-        if raw_response.endswith("```"):
-            raw_response = raw_response[:-3]
-            
-        structured_data = json.loads(raw_response.strip())
+        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
+        structured_data = parse_llm_json(response.text)
         
         structured_data["title"] = f"[AI Extracted: {file.filename}] " + structured_data.get("title", "Unknown Title")
-        
         if not structured_data.get("geographies"):
              structured_data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
              
         return structured_data
 
     except Exception as e:
-        print(f"LLM Parsing Error: {str(e)}") # This prints to Render Logs
-        raise HTTPException(status_code=400, detail=f"Error parsing PDF with LLM: {str(e)}")
+        print(f"Parsing Error: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/participants/filter")
 async def filter_participants(req: FilterRequest):
-    """Filters the 5000 Sentinel patients based on MedAlign-inspired structured criteria"""
     criteria = req.protocol.structured_criteria
     eligible_patients = []
     site_counts = {state: 0 for state in req.protocol.geographies}
 
     for pt in db_patients:
         pt_state = pt["location"]["state"]
-        if pt_state not in req.protocol.geographies:
-            continue
+        if pt_state not in req.protocol.geographies: continue
             
         age = pt["demographics"]["age"]
         if criteria.age_min and age < criteria.age_min: continue
@@ -323,8 +305,7 @@ async def filter_participants(req: FilterRequest):
         if excl_conditions and not excl_conditions.isdisjoint(pt_conditions): continue
             
         eligible_patients.append(pt)
-        if pt_state in site_counts:
-            site_counts[pt_state] += 1
+        if pt_state in site_counts: site_counts[pt_state] += 1
 
     return {
         "total_eligible": len(eligible_patients),
@@ -334,106 +315,153 @@ async def filter_participants(req: FilterRequest):
 
 @app.post("/sites/rank")
 async def rank_sites(req: SiteRankingRequest):
-    """Scores sites based on historical performance, patient availability, and therapeutic match"""
-    protocol = req.protocol
-    ranked_sites = []
-    
-    MAX_ENROLL_RATE = 20.0
-    MAX_POOL = 8000.0
+    """Uses Live Gemini AI to intelligently rank sites based on protocol metadata"""
+    try:
+        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
+        
+        # Compress the data payload to save context window and speed up the LLM response
+        compressed_sites = [
+            {
+                "id": s["site_id"],
+                "state": s["location"]["state"],
+                "specialties": s["therapeutic_areas"],
+                "enrollment_rate": s["metrics"]["past_enrollment_rate"],
+                "pool_size": s["metrics"]["patient_pool_size"]
+            } for s in db_sites
+        ]
 
-    for site in db_sites:
-        geo_score = 1.0 if site["location"]["state"] in protocol.geographies else 0.0
-        # Check if the protocol indication matches any of the site's therapeutic areas
-        thera_score = 1.0 if any(protocol.indication.lower() in ta.lower() or ta.lower() in protocol.indication.lower() for ta in site["therapeutic_areas"]) else 0.0
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        prompt = f"""
+        You are an expert Clinical Feasibility AI.
         
-        enroll_score = min(site["metrics"]["past_enrollment_rate"] / MAX_ENROLL_RATE, 1.0)
-        pool_score = min(site["metrics"]["patient_pool_size"] / MAX_POOL, 1.0)
+        Protocol Target Indication: "{req.protocol.indication}"
+        Target Geographies: {req.protocol.geographies}
         
-        total_score = (0.4 * enroll_score) + (0.3 * pool_score) + (0.2 * thera_score) + (0.1 * geo_score)
+        Available Sites Metadata:
+        {json.dumps(compressed_sites)}
         
-        site_copy = site.copy()
-        site_copy["metrics"]["performance_score"] = round(total_score, 3)
+        Task: Analyze the Available Sites and select the top 15 optimal sites for this protocol.
+        1. Heavily weight sites where their "specialties" match or are highly relevant to the "Protocol Target Indication".
+        2. Give bonuses to sites located in the Target Geographies.
+        3. Factor in the enrollment_rate and pool_size to break ties.
         
-        ranked_sites.append({
-            "site": site_copy,
-            "score": round(total_score, 3),
-            "breakdown": {
-                "enrollment_rate_component": round(enroll_score * 0.4, 3),
-                "patient_availability_component": round(pool_score * 0.3, 3),
-                "therapeutic_match_component": round(thera_score * 0.2, 3),
-                "geography_match_component": round(geo_score * 0.1, 3)
-            }
-        })
-        
-    ranked_sites.sort(key=lambda x: x["score"], reverse=True)
-    return {"top_sites": ranked_sites[:15]}
+        DO NOT use markdown backticks. Return ONLY strict JSON in this exact structure:
+        {{
+            "top_sites": [
+                {{
+                    "site_id": "string",
+                    "score": <float between 0.0 and 1.0>,
+                    "breakdown": {{
+                        "enrollment_rate_component": <float>,
+                        "patient_availability_component": <float>,
+                        "therapeutic_match_component": <float>,
+                        "geography_match_component": <float>
+                    }}
+                }}
+            ]
+        }}
+        """
+
+        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
+        llm_results = parse_llm_json(response.text)
+
+        # Re-attach the LLM's scores to our rich database objects for the UI
+        ranked_sites = []
+        for item in llm_results.get("top_sites", []):
+            site_obj = next((s for s in db_sites if s["site_id"] == item["site_id"]), None)
+            if site_obj:
+                site_copy = site_obj.copy()
+                site_copy["metrics"]["performance_score"] = item["score"]
+                ranked_sites.append({
+                    "site": site_copy,
+                    "score": item["score"],
+                    "breakdown": item["breakdown"]
+                })
+
+        # Ensure they are sorted highest to lowest score
+        ranked_sites.sort(key=lambda x: x["score"], reverse=True)
+        return {"top_sites": ranked_sites}
+
+    except Exception as e:
+        print(f"AI Ranking Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/enrollment/simulate")
 async def simulate_enrollment(req: SimulationRequest):
-    """Simulates enrollment velocity over time based on CMS patterns and synthetic assumptions"""
-    selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
-    if not selected:
-        raise HTTPException(status_code=400, detail="No valid sites selected")
+    """Uses Live Gemini AI to simulate realistic, non-linear enrollment velocity"""
+    try:
+        if not api_key: raise HTTPException(status_code=500, detail="Gemini API Key missing.")
 
-    timeline = []
-    cumulative = 0
-    month = 1
-    
-    target = req.protocol.target_enrollment if req.protocol.target_enrollment else 100 # Fallback
-    
-    while cumulative < target and month <= 60:
-        monthly_total = 0
-        for site in selected:
-            base_rate = site["metrics"]["past_enrollment_rate"]
-            # Inject ±20% fluctuation per site, per month (CMS Pattern Simulation)
-            variance = random.uniform(0.80, 1.20) 
-            monthly_total += int(base_rate * variance)
-            
-        cumulative += monthly_total
-        if cumulative > target:
-            cumulative = target
-            
-        timeline.append({
-            "month": month, 
-            "monthly_enrolled": monthly_total,
-            "cumulative_enrolled": cumulative
-        })
-        month += 1
+        selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
+        if not selected: raise HTTPException(status_code=400, detail="No sites selected")
 
-    return {
-        "protocol_id": req.protocol.protocol_id,
-        "estimated_completion_month": month - 1,
-        "total_sites_active": len(selected),
-        "timeline": timeline
-    }
+        target = req.protocol.target_enrollment or 100
+        
+        compressed_sites = [{"site_id": s["site_id"], "avg_monthly_enrollment": s["metrics"]["past_enrollment_rate"], "activation_days": s["metrics"]["activation_time_days"]} for s in selected]
+
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        prompt = f"""
+        You are an AI Clinical Trial Projection Engine.
+        
+        Target Total Enrollment: {target}
+        Selected Sites Data:
+        {json.dumps(compressed_sites)}
+        
+        Task: Simulate a realistic month-by-month enrollment timeline.
+        - Important: Look at the 'activation_days' for each site. Sites with 45+ activation days will NOT enroll anyone in Month 1.
+        - Apply a "ramp-up" curve: sites enroll slower in their first active month.
+        - Apply random real-world variances (e.g., occasional slow months due to holidays or staff turnover).
+        - Keep generating month objects until the 'cumulative_enrolled' meets or slightly exceeds the Target Total Enrollment.
+        - Cap at 60 months maximum.
+        
+        DO NOT use markdown backticks. Return ONLY strict JSON in this exact structure:
+        {{
+            "estimated_completion_month": <integer>,
+            "timeline": [
+                {{
+                    "month": <integer>,
+                    "monthly_enrolled": <integer>,
+                    "cumulative_enrolled": <integer>
+                }}
+            ]
+        }}
+        """
+
+        response = model.generate_content(prompt, generation_config=genai.GenerationConfig(response_mime_type="application/json"))
+        llm_timeline = parse_llm_json(response.text)
+
+        return {
+            "protocol_id": req.protocol.protocol_id,
+            "estimated_completion_month": llm_timeline.get("estimated_completion_month", 0),
+            "total_sites_active": len(selected),
+            "timeline": llm_timeline.get("timeline", [])
+        }
+
+    except Exception as e:
+        print(f"AI Simulation Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/documents/generate")
 async def generate_document(req: DocGenerationRequest):
-    """Generates selected synthetic documents and returns them as a ZIP archive"""
     selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for site in selected:
-            
             if "FDA_1572" in req.doc_types:
                 doc = Document()
-                doc.add_heading('FDA Form 1572 - Statement of Investigator', 0)
+                doc.add_heading('FDA Form 1572', 0)
                 doc.add_paragraph(f"NCT ID: {req.protocol.nct_id}")
                 doc.add_paragraph(f"Indication: {req.protocol.indication.title()}")
                 doc.add_paragraph(f"Site: {site['name']} (NPI: {site['npi']})")
-                doc.add_paragraph(f"Organization Type: {site['organization_type'].title()}")
-                doc.add_paragraph(f"Address: {site['location']['city']}, {site['location']['state']} {site['location']['zip']}")
                 f = io.BytesIO()
                 doc.save(f)
                 zip_file.writestr(f"FDA_1572_{site['npi']}.docx", f.getvalue())
                 
             if "CDA" in req.doc_types:
                 doc = Document()
-                doc.add_heading('Confidential Disclosure Agreement (CDA)', 0)
-                doc.add_paragraph(f"This agreement is between the Sponsor and {site['name']}.")
-                doc.add_paragraph(f"Regarding Protocol: {req.protocol.title}")
-                doc.add_paragraph(f"Date Generated: {datetime.now().strftime('%Y-%m-%d')}")
+                doc.add_heading('CDA', 0)
+                doc.add_paragraph(f"Agreement between Sponsor and {site['name']}.")
                 f = io.BytesIO()
                 doc.save(f)
                 zip_file.writestr(f"CDA_{site['npi']}.docx", f.getvalue())
@@ -442,16 +470,13 @@ async def generate_document(req: DocGenerationRequest):
                 doc = Document()
                 doc.add_heading('Protocol Signature Page', 0)
                 doc.add_paragraph(f"Protocol: {req.protocol.title}")
-                doc.add_paragraph("I agree to conduct the study in compliance with the protocol.")
-                doc.add_paragraph("Investigator Signature: _________________________")
-                doc.add_paragraph("Date: _________________________")
                 f = io.BytesIO()
                 doc.save(f)
-                zip_file.writestr(f"Signature_Page_{site['npi']}.docx", f.getvalue())
+                zip_file.writestr(f"Signature_{site['npi']}.docx", f.getvalue())
 
     zip_buffer.seek(0)
     return StreamingResponse(
         zip_buffer, 
         media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=Activation_Docs_{req.protocol.protocol_id}.zip"}
+        headers={"Content-Disposition": f"attachment; filename=Docs_{req.protocol.protocol_id}.zip"}
     )
