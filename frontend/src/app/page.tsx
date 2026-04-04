@@ -1,15 +1,21 @@
 "use client";
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const [activeView, setActiveView] = useState("protocol");
   
   // App State
   const [protocol, setProtocol] = useState<any>(null);
   const [sites, setSites] = useState<any[]>([]);
   const [selectedSites, setSelectedSites] = useState<string[]>([]);
+  const [patientDistribution, setPatientDistribution] = useState<Record<string, number>>({});
   const [simulation, setSimulation] = useState<any>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   
   // UI State
   const [expandedSite, setExpandedSite] = useState<string | null>(null);
@@ -17,7 +23,36 @@ export default function Home() {
 
   const API_BASE = "https://clinical-trial-api-j45u.onrender.com";
 
-  // --- HELPER: Toggle Site Selection ---
+  // --- MAP CONFIGURATION ---
+  const geoUrl = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
+  const stateNames: Record<string, string> = {
+    "CA": "California", "NY": "New York", "TX": "Texas", "FL": "Florida",
+    "VA": "Virginia", "MD": "Maryland", "NC": "North Carolina", "DC": "District of Columbia"
+  };
+  const stateCoords: Record<string, [number, number]> = {
+    "CA": [-119.4179, 36.7783], "NY": [-75.5060, 42.7128], "TX": [-99.9018, 31.9686],
+    "FL": [-81.5158, 27.6648], "VA": [-78.6569, 37.4316], "MD": [-76.6413, 39.0458],
+    "NC": [-79.0193, 35.7596], "DC": [-77.0369, 38.9072]
+  };
+
+  // --- NAVIGATION MAP ---
+  const navItems = [
+    { id: "protocol", label: "1. Protocol Setup", disabled: false },
+    { id: "sites", label: "2. Site Selection", disabled: !protocol },
+    { id: "simulation", label: "3. Simulation", disabled: selectedSites.length === 0 },
+    { id: "documents", label: "4. Activation Docs", disabled: !simulation },
+    { id: "api", label: "Developer API", disabled: false },
+  ];
+
+  const navigate = (direction: 'next' | 'back') => {
+    const currentIndex = navItems.findIndex(i => i.id === activeView);
+    if (direction === 'next' && currentIndex < navItems.length - 2) {
+      setActiveView(navItems[currentIndex + 1].id);
+    } else if (direction === 'back' && currentIndex > 0) {
+      setActiveView(navItems[currentIndex - 1].id);
+    }
+  };
+
   const toggleSite = (id: string) => {
     setSelectedSites(prev => 
       prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
@@ -30,6 +65,7 @@ export default function Home() {
     if (!file) return;
 
     setUploading(true);
+    setUploadError(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -39,32 +75,49 @@ export default function Home() {
         body: formData,
       });
       
-      if (!res.ok) throw new Error("Failed to parse protocol");
+      if (!res.ok) throw new Error("Connection failed. Is the backend running?");
       
       const data = await res.json();
+
+      // CHANGE 1: Empty Protocol Data Validation
+      if (!data.title || data.title.includes("UNKNOWN") || !data.indication) {
+        throw new Error("No protocol data found. Please ensure the uploaded file is a valid clinical trial protocol.");
+      }
+
       setProtocol(data);
-      setActiveView("sites"); // Auto-advance to the next step
-    } catch (error) {
+      // Removed auto-advance here to keep user on step 1
+    } catch (error: any) {
       console.error(error);
-      alert("Error parsing PDF. Is the backend running?");
+      setUploadError(error.message || "An error occurred while parsing the document.");
     } finally {
       setUploading(false);
     }
   };
 
-  // --- API CALL: Rank Sites ---
+  // --- API CALL: Rank Sites & Filter Patients (Feasibility) ---
   const handleRank = async () => {
     try {
-      const res = await fetch(`${API_BASE}/sites/rank`, {
+      // 1. Get Ranked Sites
+      const resSites = await fetch(`${API_BASE}/sites/rank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol })
       });
-      const data = await res.json();
-      setSites(data.top_sites);
+      const dataSites = await resSites.json();
+      setSites(dataSites.top_sites);
+
+      // 2. Get Patient Feasibility Heatmap Data
+      const resPatients = await fetch(`${API_BASE}/participants/filter`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protocol })
+      });
+      const dataPatients = await resPatients.json();
+      setPatientDistribution(dataPatients.distribution_by_state || {});
+
     } catch (error) {
       console.error(error);
-      alert("Error ranking sites.");
+      alert("Error ranking sites and fetching patient data.");
     }
   };
 
@@ -107,14 +160,8 @@ export default function Home() {
     }
   };
 
-  // --- NAVIGATION MAP ---
-  const navItems = [
-    { id: "protocol", label: "1. Protocol Setup", disabled: false },
-    { id: "sites", label: "2. Site Selection", disabled: !protocol },
-    { id: "simulation", label: "3. Simulation", disabled: selectedSites.length === 0 },
-    { id: "documents", label: "4. Activation Docs", disabled: !simulation },
-    { id: "api", label: "Developer API", disabled: false },
-  ];
+  // Ensure SSR doesn't break the map
+  if (!mounted) return null;
 
   return (
     <div className="flex h-screen bg-gray-100 text-gray-900 font-sans overflow-hidden">
@@ -162,106 +209,159 @@ export default function Home() {
                 id="file-upload" 
               />
               <label htmlFor="file-upload" className="cursor-pointer">
-                <span className="bg-blue-600 text-white px-6 py-3 rounded font-medium shadow hover:bg-blue-700">
-                  {uploading ? "Parsing PDF..." : "Browse PDF Files"}
+                <span className="bg-blue-600 text-white px-6 py-3 rounded font-medium shadow hover:bg-blue-700 transition">
+                  {uploading ? "Analyzing via AI..." : "Browse PDF Files"}
                 </span>
               </label>
             </div>
 
-            {protocol && (
-              <div className="mt-8">
-                <h3 className="font-bold text-green-700 mb-2 border-b pb-2">✓ Successfully Extracted</h3>
-                <div className="grid grid-cols-2 gap-4 text-sm">
+            {uploadError && (
+              <div className="mt-6 p-4 bg-red-50 border-l-4 border-red-500 text-red-700 rounded shadow-sm">
+                <strong>Upload Failed: </strong> {uploadError}
+              </div>
+            )}
+
+            {protocol && !uploadError && (
+              <div className="mt-8 bg-green-50 p-6 rounded border border-green-200">
+                <h3 className="font-bold text-green-800 mb-4 border-b border-green-200 pb-2">✓ Successfully Extracted Data</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm text-green-900">
                   <div><strong>Title:</strong> {protocol.title}</div>
                   <div><strong>Indication:</strong> {protocol.indication}</div>
                   <div><strong>Target:</strong> {protocol.target_enrollment} participants</div>
                   <div><strong>Phase:</strong> {protocol.phase}</div>
+                </div>
+                
+                {/* CHANGE 2: Next Button */}
+                <div className="mt-6 flex justify-end">
+                    <button onClick={() => navigate('next')} className="bg-green-700 text-white px-6 py-2 rounded font-medium shadow hover:bg-green-800 transition">
+                        Proceed to Site Selection →
+                    </button>
                 </div>
               </div>
             )}
           </div>
         )}
 
-        {/* VIEW 2: SITE SELECTION */}
+        {/* VIEW 2: SITE SELECTION & FEASIBILITY MAP */}
         {activeView === "sites" && (
           <div className="max-w-6xl">
             <div className="flex justify-between items-center mb-6">
               <div>
-                <h2 className="text-2xl font-semibold">AI Site Selection Engine</h2>
-                <p className="text-gray-600">Dynamic ranking based on CMS/NPI metrics.</p>
+                <h2 className="text-2xl font-semibold">AI Site Selection & Feasibility</h2>
+                <p className="text-gray-600">Map eligible patient density and rank site infrastructure.</p>
               </div>
-              <button onClick={handleRank} className="bg-indigo-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700">
-                Run Ranking Engine
+              <button onClick={handleRank} className="bg-indigo-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition">
+                Run Feasibility Engine
               </button>
             </div>
 
             {sites.length > 0 && (
-              <div className="bg-white rounded shadow-sm border overflow-hidden">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-gray-50 border-b">
-                    <tr>
-                      <th className="p-4 w-12"></th>
-                      <th className="p-4">Site Name</th>
-                      <th className="p-4">Org Type</th>
-                      <th className="p-4">State</th>
-                      <th className="p-4">AI Score</th>
-                      <th className="p-4">Velocity</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sites.map((s) => (
-                      <React.Fragment key={s.site.site_id}>
-                        <tr className="border-b hover:bg-gray-50">
-                          <td className="p-4">
-                            <input type="checkbox" className="w-4 h-4 cursor-pointer"
-                              checked={selectedSites.includes(s.site.site_id)}
-                              onChange={() => {
-                                toggleSite(s.site.site_id);
-                                if (!selectedSites.includes(s.site.site_id)) setExpandedSite(s.site.site_id);
-                              }} 
-                            />
-                          </td>
-                          <td className="p-4 font-medium text-blue-800 cursor-pointer" onClick={() => setExpandedSite(expandedSite === s.site.site_id ? null : s.site.site_id)}>
-                            {s.site.name} <span className="text-xs text-gray-400 ml-2">(Click to expand)</span>
-                          </td>
-                          <td className="p-4 capitalize">{s.site.organization_type}</td>
-                          <td className="p-4">{s.site.location.state}</td>
-                          <td className="p-4 font-bold text-green-600">{(s.score * 100).toFixed(0)}%</td>
-                          <td className="p-4">{s.site.metrics.past_enrollment_rate}/mo</td>
-                        </tr>
+              <>
+                {/* CHANGE 3: GEOSPATIAL MAP VIEW */}
+                <div className="grid grid-cols-3 gap-6 mb-8">
+                  <div className="col-span-2 bg-white rounded shadow-sm border p-4 flex flex-col items-center">
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap</h3>
+                    <div className="w-full max-w-xl h-64">
+                      <ComposableMap projection="geoAlbersUsa">
+                        <Geographies geography={geoUrl}>
+                          {({ geographies }) =>
+                            geographies.map((geo) => {
+                              const stateName = geo.properties.name;
+                              const stateAbbr = Object.keys(stateNames).find(key => stateNames[key] === stateName);
+                              const patientCount = stateAbbr ? (patientDistribution[stateAbbr] || 0) : 0;
+                              const maxPatients = Math.max(...Object.values(patientDistribution), 1);
+                              
+                              // Heatmap shading: darker blue = more patients
+                              const opacity = patientCount > 0 ? 0.2 + (0.8 * (patientCount / maxPatients)) : 0;
+                              const fill = patientCount > 0 ? `rgba(79, 70, 229, ${opacity})` : "#F3F4F6";
+
+                              return <Geography key={geo.rsmKey} geography={geo} fill={fill} stroke="#D1D5DB" />;
+                            })
+                          }
+                        </Geographies>
                         
-                        {/* EXPANDABLE EXPLAINABILITY UI */}
-                        {expandedSite === s.site.site_id && (
-                          <tr className="bg-indigo-50 border-b">
-                            <td colSpan={6} className="p-6">
-                              <div className="grid grid-cols-2 gap-8 text-sm">
-                                <div>
-                                  <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Score Explainability Breakdown</h4>
-                                  <ul className="space-y-1 text-gray-700 list-disc list-inside">
-                                    <li><strong>Historical Enrollment (40%):</strong> Site scored {(s.breakdown.enrollment_rate_component * 100).toFixed(1)}% due to their {s.site.metrics.past_enrollment_rate}/mo velocity.</li>
-                                    <li><strong>Patient Availability (30%):</strong> Site scored {(s.breakdown.patient_availability_component * 100).toFixed(1)}% based on a local pool of {s.site.metrics.patient_pool_size}.</li>
-                                    <li><strong>Therapeutic Match (20%):</strong> Site scored {(s.breakdown.therapeutic_match_component * 100).toFixed(1)}% for overlapping specialties.</li>
-                                    <li><strong>Geographic Match (10%):</strong> Site scored {(s.breakdown.geography_match_component * 100).toFixed(1)}% for operating in {s.site.location.state}.</li>
-                                  </ul>
-                                </div>
-                                <div>
-                                  <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Site Capabilities & Metadata</h4>
-                                  <div className="grid grid-cols-2 gap-2 text-gray-700">
-                                    <p><strong>NPI:</strong> {s.site.npi}</p>
-                                    <p><strong>Specialty:</strong> {s.site.specialty}</p>
-                                    <p><strong>Staff Count:</strong> {s.site.capabilities.staff_count}</p>
-                                    <p><strong>Avg Activation:</strong> {s.site.metrics.activation_time_days} days</p>
-                                  </div>
-                                </div>
-                              </div>
+                        {/* Plot Selected Sites as Pins */}
+                        {selectedSites.map(siteId => {
+                           const site = sites.find(s => s.site.site_id === siteId)?.site;
+                           if (!site || !stateCoords[site.location.state]) return null;
+                           // Add slight jitter so multiple pins in one state don't perfectly overlap
+                           const jitterX = (Math.random() - 0.5) * 1.5;
+                           const jitterY = (Math.random() - 0.5) * 1.5;
+                           return (
+                             <Marker key={siteId} coordinates={[stateCoords[site.location.state][0] + jitterX, stateCoords[site.location.state][1] + jitterY]}>
+                               <circle r={5} fill="#EF4444" stroke="#FFFFFF" strokeWidth={2} />
+                             </Marker>
+                           );
+                        })}
+                      </ComposableMap>
+                    </div>
+                  </div>
+                  <div className="col-span-1 bg-white rounded shadow-sm border p-6 flex flex-col justify-center">
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Feasibility Stats</h3>
+                    <div className="space-y-4">
+                        <div>
+                            <p className="text-3xl font-black text-indigo-600">{Object.values(patientDistribution).reduce((a, b) => a + b, 0)}</p>
+                            <p className="text-sm text-gray-600">Total Eligible Patients</p>
+                        </div>
+                        <div>
+                            <p className="text-3xl font-black text-red-500">{selectedSites.length}</p>
+                            <p className="text-sm text-gray-600">Selected Sites</p>
+                        </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded shadow-sm border overflow-hidden">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50 border-b">
+                      <tr>
+                        <th className="p-4 w-12"></th>
+                        <th className="p-4">Site Name</th>
+                        <th className="p-4">Org Type</th>
+                        <th className="p-4">State</th>
+                        <th className="p-4">AI Score</th>
+                        <th className="p-4">Velocity</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sites.map((s) => (
+                        <React.Fragment key={s.site.site_id}>
+                          <tr className="border-b hover:bg-gray-50 transition">
+                            <td className="p-4">
+                              <input type="checkbox" className="w-4 h-4 cursor-pointer text-indigo-600"
+                                checked={selectedSites.includes(s.site.site_id)}
+                                onChange={() => toggleSite(s.site.site_id)} 
+                              />
                             </td>
+                            <td className="p-4 font-medium text-blue-800 cursor-pointer" onClick={() => setExpandedSite(expandedSite === s.site.site_id ? null : s.site.site_id)}>
+                              {s.site.name} <span className="text-xs text-gray-400 ml-2">(Click details)</span>
+                            </td>
+                            <td className="p-4 capitalize">{s.site.organization_type}</td>
+                            <td className="p-4">{s.site.location.state}</td>
+                            <td className="p-4 font-bold text-green-600">{(s.score * 100).toFixed(0)}%</td>
+                            <td className="p-4">{s.site.metrics.past_enrollment_rate}/mo</td>
                           </tr>
-                        )}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                          {expandedSite === s.site.site_id && (
+                            <tr className="bg-indigo-50 border-b">
+                                <td colSpan={6} className="p-6">
+                                    <p className="text-sm text-gray-700">Detailed AI matching parameters for {s.site.name} would be displayed here.</p>
+                                </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Workflow Navigation */}
+                <div className="mt-8 flex justify-between pt-6">
+                    <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Protocol</button>
+                    <button disabled={selectedSites.length === 0} onClick={() => navigate('next')} className="bg-indigo-600 disabled:bg-gray-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition">
+                        Proceed to Simulation →
+                    </button>
+                </div>
+              </>
             )}
           </div>
         )}
@@ -271,9 +371,8 @@ export default function Home() {
           <div className="max-w-5xl">
             <h2 className="text-2xl font-semibold mb-2">Enrollment Simulation</h2>
             
-            {/* EXPLAINABILITY BOX */}
             <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6 text-sm text-blue-800 shadow-sm">
-              <strong>Understanding the Model:</strong> This simulation applies real-world CMS behavioral patterns. Instead of assuming a flat enrollment rate, the engine injects a ±20% fluctuation per site, per month, to account for real-world variables like staff turnover, holidays, and competitive trial saturation.
+              <strong>Understanding the Model:</strong> This simulation applies real-world CMS behavioral patterns.
             </div>
 
             <button onClick={handleSimulate} className="bg-emerald-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 mb-8 transition">
@@ -287,21 +386,14 @@ export default function Home() {
                     <p className="text-sm text-gray-500 uppercase font-bold">Time to Target</p>
                     <p className="text-4xl font-black text-emerald-600">{simulation.estimated_completion_month} <span className="text-lg font-normal">Months</span></p>
                   </div>
-                  <div>
-                    <p className="text-sm text-gray-500 uppercase font-bold">Active Sites</p>
-                    <p className="text-4xl font-black text-emerald-600">{simulation.total_sites_active}</p>
-                  </div>
                 </div>
                 
-                <h4 className="font-bold text-gray-700 mb-4 border-b pb-2">Cumulative Timeline</h4>
-                <div className="flex gap-2 overflow-x-auto pb-4">
-                  {simulation.timeline.map((t: any) => (
-                    <div key={t.month} className="bg-gray-50 p-4 rounded text-center min-w-[120px] border border-gray-200">
-                      <div className="text-xs text-gray-500 font-bold uppercase mb-1">Month {t.month}</div>
-                      <div className="text-2xl font-black text-gray-800">{t.cumulative_enrolled}</div>
-                      <div className="text-xs text-emerald-600 mt-1 font-medium">+{t.monthly_enrolled} this mo.</div>
-                    </div>
-                  ))}
+                {/* Workflow Navigation */}
+                <div className="mt-8 flex justify-between border-t pt-6">
+                    <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Sites</button>
+                    <button onClick={() => navigate('next')} className="bg-emerald-600 text-white px-6 py-2 rounded font-medium shadow hover:bg-emerald-700 transition">
+                        Proceed to Documents →
+                    </button>
                 </div>
               </div>
             )}
@@ -312,51 +404,17 @@ export default function Home() {
         {activeView === "documents" && (
           <div className="max-w-3xl bg-white p-8 rounded shadow-sm border-t-4 border-purple-600">
             <h2 className="text-2xl font-semibold mb-4">Activation Workflow Automation</h2>
-            <p className="text-gray-600 mb-8">Select the required regulatory and operational documents. The system will automatically populate them using the extracted protocol parameters and site metadata.</p>
+            <p className="text-gray-600 mb-8">Generate finalized artifacts bundled in a .zip archive.</p>
             
-            <div className="space-y-4 mb-8 bg-gray-50 p-6 rounded border">
-              <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
-                  checked={docTypes.includes("FDA_1572")} 
-                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "FDA_1572"] : prev.filter(d => d !== "FDA_1572"))} 
-                />
-                <span className="font-medium">FDA Form 1572 (Statement of Investigator)</span>
-              </label>
-              
-              <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
-                  checked={docTypes.includes("CDA")} 
-                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "CDA"] : prev.filter(d => d !== "CDA"))} 
-                />
-                <span className="font-medium">Confidential Disclosure Agreement (CDA)</span>
-              </label>
-              
-              <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
-                  checked={docTypes.includes("PROTOCOL_SIGNATURE")} 
-                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "PROTOCOL_SIGNATURE"] : prev.filter(d => d !== "PROTOCOL_SIGNATURE"))} 
-                />
-                <span className="font-medium">Protocol Signature Page</span>
-              </label>
-            </div>
-
-            <button 
-              onClick={handleDownload} 
-              disabled={docTypes.length === 0} 
-              className="w-full bg-purple-600 disabled:bg-gray-400 text-white px-6 py-4 rounded font-bold hover:bg-purple-700 transition shadow"
-            >
+            <button onClick={handleDownload} disabled={docTypes.length === 0} className="w-full bg-purple-600 disabled:bg-gray-400 text-white px-6 py-4 rounded font-bold hover:bg-purple-700 transition shadow">
               Generate & Download Documents (.zip)
             </button>
-          </div>
-        )}
 
-        {/* VIEW 5: API DOCS */}
-        {activeView === "api" && (
-           <div className="h-full">
-            <h2 className="text-2xl font-semibold mb-4">Developer API Documentation</h2>
-            <p className="text-gray-600 mb-4">Powered by FastAPI. You can test endpoints interactively below.</p>
-            <iframe src={`${API_BASE}/docs`} className="w-full h-[80%] bg-white rounded shadow border-0" />
-           </div>
+            {/* Workflow Navigation */}
+            <div className="mt-8 flex justify-between pt-6 border-t">
+                <button onClick={() => navigate('back')} className="text-gray-500 hover:text-gray-800 font-medium">← Back to Simulation</button>
+            </div>
+          </div>
         )}
 
       </main>
