@@ -15,7 +15,7 @@ export default function Home() {
   const [expandedSite, setExpandedSite] = useState<string | null>(null);
   const [docTypes, setDocTypes] = useState<string[]>(["FDA_1572"]);
 
-  const API_BASE = "http://localhost:8000";
+  const API_BASE = "https://clinical-trial-api-j45u.onrender.com";
 
   // --- HELPER: Toggle Site Selection ---
   const toggleSite = (id: string) => {
