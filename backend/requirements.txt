@@ -3,4 +3,5 @@ uvicorn
 pydantic
 faker
 python-docx
-fastapi-cors
+python-multipart
+PyPDF2
