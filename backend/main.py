@@ -11,9 +11,21 @@ import zipfile
 import PyPDF2
 from fastapi.responses import StreamingResponse
 
+# --- LIVE LLM IMPORTS & SECURITY ---
+import json
+import os
+import google.generativeai as genai
+
+# Fetch the API key safely from the environment
+api_key = os.environ.get("GEMINI_API_KEY")
+
+if not api_key:
+    print("WARNING: GEMINI_API_KEY environment variable is not set. LLM parsing will fail.")
+else:
+    genai.configure(api_key=api_key)
+
 # =====================================================================
 # STEP 1: CANONICAL SCHEMAS (Pydantic Data Models)
-# 100% Adherence to Unified Data Model & Mock Schema Anchors
 # =====================================================================
 
 class StructuredCriteria(BaseModel):
@@ -98,46 +110,21 @@ class DocGenerationRequest(BaseModel):
 
 # =====================================================================
 # SEPARATE MODULE: SYNTHETIC DATA GENERATOR
-# Handles Steps 2, 3, and 4 of the Synthetic Data Generation Plan
+# Handles Sites and Patients 
 # =====================================================================
 
 class SyntheticDataGenerator:
     def __init__(self):
         self.fake = Faker()
-        # Establish Relationships: Locked set of geographies to GUARANTEE overlap
         self.target_states = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
         self.conditions = ["hypertension", "type 2 diabetes", "heart failure", "nsclc", "asthma", "stroke"]
         self.therapeutic_areas = ["cardiology", "endocrinology", "oncology", "pulmonology", "neurology"]
         self.org_types = ["hospital", "clinic", "academic medical center", "private practice"]
 
-    def generate_protocols(self) -> List[dict]:
-        """Generates realistic protocols based on ClinicalTrials.gov structure"""
-        return [
-            {
-                "protocol_id": "P-001",
-                "nct_id": "NCT12345678",
-                "title": "Efficacy of Novel Inhibitor in Hypertension",
-                "indication": "hypertension",
-                "phase": "Phase 3",
-                "target_enrollment": 300,
-                "inclusion_criteria": ["Age 50-75", "Diagnosis of hypertension"],
-                "exclusion_criteria": ["History of stroke"],
-                "structured_criteria": {
-                    "age_min": 50,
-                    "age_max": 75,
-                    "conditions_required": ["hypertension"],
-                    "conditions_excluded": ["stroke"]
-                },
-                "geographies": ["VA", "MD", "DC", "NY"],
-                "created_at": datetime.now().isoformat()
-            }
-        ]
-
     def generate_sites(self, num_records=100) -> List[dict]:
         """Generates 100 Sites based on NPI/CMS structure with Behavioral Realism"""
         sites = []
         for _ in range(num_records):
-            # Behavioral Realism (High vs Low performing sites)
             is_high_performer = random.random() > 0.8 
             
             if is_high_performer:
@@ -183,12 +170,12 @@ class SyntheticDataGenerator:
             age = int(random.gauss(60, 15))
             age = max(18, min(age, 90))
             
-            # Pre-seed condition prevalence to ensure eligibility matching
             patient_conditions = []
             rand_val = random.random()
             if rand_val < 0.30: patient_conditions.append("hypertension")
             if rand_val < 0.15: patient_conditions.append("type 2 diabetes")
             if 0.40 < rand_val < 0.45: patient_conditions.append("nsclc")
+            if 0.50 < rand_val < 0.55: patient_conditions.append("asthma")
             
             patients.append({
                 "patient_id": f"PT-{self.fake.unique.random_number(digits=8, fix_len=True)}",
@@ -209,11 +196,10 @@ class SyntheticDataGenerator:
 
     def build_all(self):
         print("Initializing Synthetic Data Engine...")
-        protocols = self.generate_protocols()
         sites = self.generate_sites(100)
         patients = self.generate_patients(5000)
-        print(f"Generated: {len(protocols)} Protocols, {len(sites)} Sites, {len(patients)} Patients.")
-        return protocols, sites, patients
+        print(f"Generated: {len(sites)} Sites, {len(patients)} Patients.")
+        return sites, patients
 
 
 # =====================================================================
@@ -231,31 +217,83 @@ app.add_middleware(
 )
 
 # In-Memory Database
-db_protocols = []
 db_sites = []
 db_patients = []
 
 @app.on_event("startup")
 def load_data():
-    global db_protocols, db_sites, db_patients
+    global db_sites, db_patients
     generator = SyntheticDataGenerator()
-    db_protocols, db_sites, db_patients = generator.build_all()
+    db_sites, db_patients = generator.build_all()
 
 @app.post("/protocol/parse")
 async def parse_protocol(file: UploadFile = File(...)):
-    """Reads uploaded PDF, extracts text, and simulates AI extraction to structured JSON"""
+    """Reads uploaded PDF, extracts text, and uses Live Gemini LLM to structure JSON"""
     try:
+        if not api_key:
+             raise HTTPException(status_code=500, detail="Gemini API Key is not configured on the server.")
+
+        # 1. Extract text from the PDF
         pdf_reader = PyPDF2.PdfReader(file.file)
         extracted_text = ""
         for page in pdf_reader.pages:
             extracted_text += page.extract_text()
             
-        # Mocking LLM extraction for MVP. In production, pass `extracted_text` to LLM.
-        mock_response = db_protocols[0].copy()
-        mock_response["title"] = f"[{file.filename}] " + mock_response["title"]
-        return mock_response
+        # 2. Initialize the Gemini Model 
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # 3. Prompt Engineering: Force the LLM to output our exact schema
+        prompt = f"""
+        You are an expert clinical trial data extraction AI. 
+        Read the following clinical trial protocol text and extract the key parameters into a strict JSON format.
+        
+        Required JSON structure:
+        {{
+            "protocol_id": "Generate a random ID like P-102",
+            "nct_id": "Extract NCT ID or use 'UNKNOWN'",
+            "title": "Extract full study title",
+            "indication": "Extract the primary disease or condition being studied in lowercase (e.g., hypertension, nsclc)",
+            "phase": "Extract trial phase (e.g., 'Phase 3')",
+            "target_enrollment": <integer of target participants>,
+            "inclusion_criteria": ["criteria 1", "criteria 2"],
+            "exclusion_criteria": ["criteria 1", "criteria 2"],
+            "structured_criteria": {{
+                "age_min": <integer or null>,
+                "age_max": <integer or null>,
+                "conditions_required": ["extract specific required diseases/conditions in lowercase"],
+                "conditions_excluded": ["extract specific excluded diseases/conditions in lowercase"]
+            }},
+            "geographies": ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"],
+            "created_at": "{datetime.now().isoformat()}"
+        }}
+
+        Protocol Text to Analyze:
+        {extracted_text}
+        """
+        
+        # 4. Call the LLM, enforcing a JSON response type
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.GenerationConfig(
+                response_mime_type="application/json",
+            )
+        )
+        
+        # 5. Parse the LLM's JSON string into a Python dictionary
+        structured_data = json.loads(response.text)
+        
+        # Add a tag to the title to prove the AI processed it
+        structured_data["title"] = f"[AI Extracted: {file.filename}] " + structured_data.get("title", "Unknown Title")
+        
+        # Fallback geographies if LLM misses them to ensure the demo always works
+        if not structured_data.get("geographies"):
+             structured_data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
+             
+        return structured_data
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error parsing PDF: {str(e)}")
+        print(f"LLM Parsing Error: {e}")
+        raise HTTPException(status_code=400, detail=f"Error parsing PDF with LLM: {str(e)}")
 
 @app.post("/participants/filter")
 async def filter_participants(req: FilterRequest):
@@ -273,9 +311,9 @@ async def filter_participants(req: FilterRequest):
         if criteria.age_min and age < criteria.age_min: continue
         if criteria.age_max and age > criteria.age_max: continue
             
-        pt_conditions = set(pt["conditions"])
-        req_conditions = set(criteria.conditions_required)
-        excl_conditions = set(criteria.conditions_excluded)
+        pt_conditions = set([c.lower() for c in pt["conditions"]])
+        req_conditions = set([c.lower() for c in criteria.conditions_required])
+        excl_conditions = set([c.lower() for c in criteria.conditions_excluded])
         
         if req_conditions and not req_conditions.issubset(pt_conditions): continue
         if excl_conditions and not excl_conditions.isdisjoint(pt_conditions): continue
@@ -301,7 +339,9 @@ async def rank_sites(req: SiteRankingRequest):
 
     for site in db_sites:
         geo_score = 1.0 if site["location"]["state"] in protocol.geographies else 0.0
-        thera_score = 1.0 if protocol.indication in site["therapeutic_areas"] else 0.0
+        # Check if the protocol indication matches any of the site's therapeutic areas
+        thera_score = 1.0 if any(protocol.indication.lower() in ta.lower() or ta.lower() in protocol.indication.lower() for ta in site["therapeutic_areas"]) else 0.0
+        
         enroll_score = min(site["metrics"]["past_enrollment_rate"] / MAX_ENROLL_RATE, 1.0)
         pool_score = min(site["metrics"]["patient_pool_size"] / MAX_POOL, 1.0)
         
@@ -335,7 +375,9 @@ async def simulate_enrollment(req: SimulationRequest):
     cumulative = 0
     month = 1
     
-    while cumulative < req.protocol.target_enrollment and month <= 60:
+    target = req.protocol.target_enrollment if req.protocol.target_enrollment else 100 # Fallback
+    
+    while cumulative < target and month <= 60:
         monthly_total = 0
         for site in selected:
             base_rate = site["metrics"]["past_enrollment_rate"]
@@ -344,8 +386,8 @@ async def simulate_enrollment(req: SimulationRequest):
             monthly_total += int(base_rate * variance)
             
         cumulative += monthly_total
-        if cumulative > req.protocol.target_enrollment:
-            cumulative = req.protocol.target_enrollment
+        if cumulative > target:
+            cumulative = target
             
         timeline.append({
             "month": month, 

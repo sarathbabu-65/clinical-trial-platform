@@ -5,3 +5,4 @@ faker
 python-docx
 python-multipart
 PyPDF2
+google-generativeai
