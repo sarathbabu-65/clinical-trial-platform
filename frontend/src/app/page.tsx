@@ -475,6 +475,65 @@ export default function Home() {
           </div>
         )}
 
+        {/* VIEW 5: DEVELOPER API */}
+        {activeView === "api" && (
+          <div className="max-w-4xl bg-white p-8 rounded shadow-sm border-t-4 border-gray-800">
+            <div className="flex justify-between items-center mb-6">
+              <div>
+                <h2 className="text-2xl font-semibold mb-2">Developer API Documentation</h2>
+                <p className="text-gray-600">Integrate clinical trial start-up capabilities directly into your existing infrastructure.</p>
+              </div>
+              <a 
+                href={`${API_BASE}/docs`} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="bg-gray-800 text-white px-6 py-2 rounded font-medium shadow hover:bg-gray-900 transition flex items-center"
+              >
+                Open Interactive Swagger UI ↗
+              </a>
+            </div>
+
+            <div className="bg-gray-50 border rounded-lg p-6 mb-8 font-mono text-sm text-gray-800">
+              <h3 className="text-gray-500 uppercase font-bold tracking-wider mb-4 text-xs">Production Base URL</h3>
+              <p className="bg-gray-200 p-2 rounded inline-block">{API_BASE}</p>
+            </div>
+
+            <h3 className="text-lg font-bold text-gray-800 mb-4">Core Endpoints</h3>
+            <div className="space-y-6">
+              
+              <div className="border rounded-lg overflow-hidden shadow-sm">
+                <div className="bg-gray-100 p-4 border-b flex justify-between items-center">
+                  <h4 className="font-bold text-gray-800 flex items-center">
+                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs mr-3 font-black">POST</span>
+                    /protocol/parse
+                  </h4>
+                  <span className="text-xs text-gray-500 font-medium bg-white px-2 py-1 rounded border">Llama 3.3 Engine</span>
+                </div>
+                <div className="p-4 bg-gray-900 text-green-400 font-mono text-xs overflow-x-auto">
+                  <p>curl -X POST "{API_BASE}/protocol/parse" \</p>
+                  <p>  -H "accept: application/json" \</p>
+                  <p>  -H "Content-Type: multipart/form-data" \</p>
+                  <p>  -F "file=@your_protocol.pdf"</p>
+                </div>
+              </div>
+
+              <div className="border rounded-lg overflow-hidden shadow-sm">
+                <div className="bg-gray-100 p-4 border-b flex justify-between items-center">
+                  <h4 className="font-bold text-gray-800 flex items-center">
+                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs mr-3 font-black">POST</span>
+                    /sites/rank
+                  </h4>
+                  <span className="text-xs text-gray-500 font-medium bg-white px-2 py-1 rounded border">Llama 3.3 Engine</span>
+                </div>
+                <div className="p-4 bg-white text-gray-600 text-sm">
+                  Analyzes available site infrastructure against protocol requirements and returns a scored JSON array of the top 15 optimal locations.
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
       </main>
     </div>
   );
