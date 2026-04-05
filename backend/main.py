@@ -159,12 +159,11 @@ async def filter_participants(req: FilterRequest):
         # FORCE GEOGRAPHIC FENCE: Always use our 8 demo states so the heatmap works beautifully
         geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in DEMO_TARGET_STATES]
         
-        # 1. Live Supabase Query (Using '*' to avoid case-sensitivity column crashes)
-        response = supabase.table('patients').select('*').in_('state', geos_full_names).execute()
-        
-        # If the lowercase 'state' failed, fallback to uppercase 'STATE' just in case
-        if len(response.data) == 0:
+        # 1. Live Supabase Query - Try uppercase STATE first, then fallback to lowercase state
+        try:
             response = supabase.table('patients').select('*').in_('STATE', geos_full_names).execute()
+        except Exception:
+            response = supabase.table('patients').select('*').in_('state', geos_full_names).execute()
 
         raw_patients = response.data
 
