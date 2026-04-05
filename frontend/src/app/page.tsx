@@ -30,10 +30,18 @@ export default function Home() {
 
   // --- MAP CONFIGURATION ---
   const geoUrl = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
+  
+  // FIPS decoder for map data that strips out the English state names
+  const fipsToAbbr: Record<string, string> = {
+    "06": "CA", "36": "NY", "48": "TX", "12": "FL",
+    "51": "VA", "24": "MD", "37": "NC", "11": "DC"
+  };
+
   const stateNames: Record<string, string> = {
     "CA": "California", "NY": "New York", "TX": "Texas", "FL": "Florida",
     "VA": "Virginia", "MD": "Maryland", "NC": "North Carolina", "DC": "District of Columbia"
   };
+  
   const stateCoords: Record<string, [number, number]> = {
     "CA": [-119.4179, 36.7783], "NY": [-75.5060, 42.7128], "TX": [-99.9018, 31.9686],
     "FL": [-81.5158, 27.6648], "VA": [-78.6569, 37.4316], "MD": [-76.6413, 39.0458],
@@ -267,8 +275,9 @@ export default function Home() {
                         <Geographies geography={geoUrl}>
                           {({ geographies }) =>
                             geographies.map((geo) => {
-                              const stateName = geo.properties.name;
-                              const stateAbbr = Object.keys(stateNames).find(key => stateNames[key] === stateName);
+                              // Safely resolve the state abbreviation via FIPS or Name
+                              const stateAbbr = fipsToAbbr[geo.id] || Object.keys(stateNames).find(key => stateNames[key] === geo.properties.name);
+                              
                               const patientCount = stateAbbr ? (patientDistribution[stateAbbr] || 0) : 0;
                               const maxPatients = Math.max(...Object.values(patientDistribution), 1);
                               
@@ -279,7 +288,7 @@ export default function Home() {
                                 <Geography 
                                   key={geo.rsmKey} 
                                   geography={geo} 
-                                  /* CRITICAL FIX: react-simple-maps overrides raw fill attributes. We must use the style prop! */
+                                  fill={fill} // Force explicit fill for robust rendering
                                   style={{
                                     default: { fill: fill, outline: "none", transition: "all 250ms" },
                                     hover: { fill: patientCount > 0 ? "#4338CA" : "#D1D5DB", outline: "none", cursor: "pointer", transition: "all 250ms" },
