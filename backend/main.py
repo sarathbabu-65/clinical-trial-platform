@@ -69,7 +69,6 @@ class DocGenerationRequest(BaseModel):
     selected_site_ids: List[str]
     doc_types: List[str]
 
-
 # =====================================================================
 # GLOBAL STATE (Caches dynamic sites during the demo session)
 # =====================================================================
@@ -156,10 +155,32 @@ async def filter_participants(req: FilterRequest):
         raise HTTPException(status_code=500, detail="Supabase integration missing. Check environment variables.")
 
     try:
-        # FORCE GEOGRAPHIC FENCE: Always use our 8 demo states so the heatmap works beautifully
-        geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in DEMO_TARGET_STATES]
+        # 1. AI-POWERED CONDITION MATCHING
+        ai_prompt = f"""
+        You are a medical database expert. Look at this clinical trial indication: "{req.protocol.indication}".
+        Also consider these inclusion criteria: {req.protocol.inclusion_criteria}.
+        Provide 2 broad, single-word medical terms that would likely appear in an EHR system's 'conditions' table to find patients for this trial.
+        Return ONLY valid JSON in this exact format: {{"search_terms": ["term1", "term2"]}}
+        """
         
-        # 1. Live Supabase Query - Try uppercase STATE first, then fallback to lowercase state
+        chat_completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": ai_prompt}],
+            model=MODEL_ID,
+            response_format={"type": "json_object"}
+        )
+        search_terms = json.loads(chat_completion.choices[0].message.content).get("search_terms", [])
+        
+        if not search_terms: search_terms = [req.protocol.indication.split()[0].lower()]
+
+        # 2. QUERY THE 'CONDITIONS' TABLE
+        valid_patient_ids = set()
+        for term in search_terms:
+            cond_res = supabase.table('conditions').select('PATIENT').ilike('DESCRIPTION', f'%{term}%').execute()
+            for row in cond_res.data:
+                valid_patient_ids.add(row['PATIENT'])
+
+        # 3. QUERY THE 'PATIENTS' TABLE (Geographic Fence)
+        geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in DEMO_TARGET_STATES]
         try:
             response = supabase.table('patients').select('*').in_('STATE', geos_full_names).execute()
         except Exception:
@@ -167,32 +188,35 @@ async def filter_participants(req: FilterRequest):
 
         raw_patients = response.data
 
-        # 2. Local Age Processing & Re-mapping abbreviations
+        # 4. INTERSECT AND PROCESS
         site_counts = {state: 0 for state in DEMO_TARGET_STATES}
         eligible_patients = []
         criteria = req.protocol.structured_criteria
-
         current_year = datetime.now().year
 
         for pt in raw_patients:
-            # Case-insensitive dictionary lookups for Supabase columns
+            pt_id = pt.get('id') or pt.get('Id') or pt.get('ID')
+            
+            # Filter: Does this patient have the specific condition?
+            if pt_id not in valid_patient_ids:
+                continue 
+
             pt_state = pt.get('state') or pt.get('STATE') or ''
             pt_gender = pt.get('gender') or pt.get('GENDER') or 'U'
             pt_birthdate = pt.get('birthdate') or pt.get('BIRTHDATE') or ''
-            pt_id = pt.get('id') or pt.get('Id') or pt.get('ID')
 
             try:
                 birth_year = int(pt_birthdate[:4])
                 age = current_year - birth_year
             except:
-                age = 45 # Fallback
+                age = 45
 
+            # Filter: Age criteria
             if criteria.age_min and age < criteria.age_min: continue
             if criteria.age_max and age > criteria.age_max: continue
 
             pt_state_abbr = STATE_ABBR_MAP.get(pt_state, pt_state)
             
-            # Only count them if they are in our target states
             if pt_state_abbr in site_counts:
                 eligible_patients.append({
                     "patient_id": pt_id,
@@ -204,11 +228,12 @@ async def filter_participants(req: FilterRequest):
         return {
             "total_eligible": len(eligible_patients),
             "distribution_by_state": site_counts,
+            "search_terms_used": search_terms,
             "sample": eligible_patients[:5]
         }
     except Exception as e:
-        print("Supabase Query Error:", str(e))
-        raise HTTPException(status_code=500, detail="Failed to query Supabase database.")
+        print("Supabase/AI Query Error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to run AI condition matching against Supabase.")
 
 @app.post("/sites/rank")
 async def rank_sites(req: SiteRankingRequest):
@@ -226,7 +251,6 @@ async def rank_sites(req: SiteRankingRequest):
         for study in ct_response.get("studies", []):
             locations = study.get("protocolSection", {}).get("contactsLocationsModule", {}).get("locations", [])
             for loc in locations:
-                # GEOGRAPHIC FENCE: Strictly filter for United States
                 country = loc.get("country", "")
                 if country != "United States":
                     continue
@@ -234,11 +258,9 @@ async def rank_sites(req: SiteRankingRequest):
                 name = loc.get("facility", "")
                 if not name or name in seen_names: continue
                 
-                # Format to our schema
                 state_raw = loc.get("state", "")
                 state_abbr = STATE_ABBR_MAP.get(state_raw, state_raw) 
 
-                # GEOGRAPHIC FENCE: Only include sites in our 8 target states so they hit the heatmap!
                 if state_abbr not in DEMO_TARGET_STATES:
                     continue
 
@@ -261,7 +283,6 @@ async def rank_sites(req: SiteRankingRequest):
                     "capabilities": {"has_trial_experience": True, "staff_count": random.randint(10, 80)}
                 })
 
-        # Fallback just in case CT.gov returns zero US matches for a weird indication
         if not real_sites:
             real_sites.append({
                 "site_id": "CT-FALLBACK", "npi": "1234567890", "name": "Mayo Clinic (Demo Fallback)",

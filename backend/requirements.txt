@@ -1,8 +1,8 @@
 fastapi
 uvicorn
 pydantic
-python-docx
 python-multipart
+python-docx
 PyPDF2
 groq
 supabase

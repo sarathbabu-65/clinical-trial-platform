@@ -1,6 +1,5 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
@@ -13,6 +12,7 @@ export default function Home() {
   const [sites, setSites] = useState<any[]>([]);
   const [selectedSites, setSelectedSites] = useState<string[]>([]);
   const [patientDistribution, setPatientDistribution] = useState<Record<string, number>>({});
+  const [searchTerms, setSearchTerms] = useState<string[]>([]);
   const [simulation, setSimulation] = useState<any>(null);
   
   // Loading & Error States
@@ -25,27 +25,12 @@ export default function Home() {
   const [expandedSite, setExpandedSite] = useState<string | null>(null);
   const [docTypes, setDocTypes] = useState<string[]>(["FDA_1572"]);
 
-  // LOCKED PRODUCTION API URL
   const API_BASE = "https://clinical-trial-api-j45u.onrender.com";
 
-  // --- MAP CONFIGURATION ---
-  const geoUrl = "https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json";
-  
-  // FIPS decoder for map data that strips out the English state names
-  const fipsToAbbr: Record<string, string> = {
-    "06": "CA", "36": "NY", "48": "TX", "12": "FL",
-    "51": "VA", "24": "MD", "37": "NC", "11": "DC"
-  };
-
+  const DEMO_TARGET_STATES = ["CA", "NY", "TX", "FL", "VA", "MD", "NC", "DC"];
   const stateNames: Record<string, string> = {
     "CA": "California", "NY": "New York", "TX": "Texas", "FL": "Florida",
-    "VA": "Virginia", "MD": "Maryland", "NC": "North Carolina", "DC": "District of Columbia"
-  };
-  
-  const stateCoords: Record<string, [number, number]> = {
-    "CA": [-119.4179, 36.7783], "NY": [-75.5060, 42.7128], "TX": [-99.9018, 31.9686],
-    "FL": [-81.5158, 27.6648], "VA": [-78.6569, 37.4316], "MD": [-76.6413, 39.0458],
-    "NC": [-79.0193, 35.7596], "DC": [-77.0369, 38.9072]
+    "VA": "Virginia", "MD": "Maryland", "NC": "North Carolina", "DC": "Dist. of Columbia"
   };
 
   const navItems = [
@@ -58,40 +43,41 @@ export default function Home() {
 
   const navigate = (direction: 'next' | 'back') => {
     const currentIndex = navItems.findIndex(i => i.id === activeView);
-    if (direction === 'next' && currentIndex < navItems.length - 2) {
-      setActiveView(navItems[currentIndex + 1].id);
-    } else if (direction === 'back' && currentIndex > 0) {
-      setActiveView(navItems[currentIndex - 1].id);
-    }
+    if (direction === 'next' && currentIndex < navItems.length - 2) setActiveView(navItems[currentIndex + 1].id);
+    else if (direction === 'back' && currentIndex > 0) setActiveView(navItems[currentIndex - 1].id);
   };
 
   const toggleSite = (id: string) => {
     setSelectedSites(prev => prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]);
   };
 
+  const resetDashboardState = () => {
+    setSites([]);
+    setSelectedSites([]);
+    setPatientDistribution({});
+    setSearchTerms([]);
+    setSimulation(null);
+    setExpandedSite(null);
+  };
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    resetDashboardState();
     setUploading(true);
     setUploadError(null);
+    
     try {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await fetch(`${API_BASE}/protocol/parse`, {
-        method: "POST",
-        body: formData,
-      });
-      
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Connection failed. Is the backend running?");
-      }
+      const res = await fetch(`${API_BASE}/protocol/parse`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error("Connection failed. Is the backend running?");
       
       const data = await res.json();
       if (!data.title || data.title.includes("UNKNOWN") || !data.indication) {
-        throw new Error("No protocol data found. Please ensure the uploaded file is a valid clinical trial protocol.");
+        throw new Error("No valid clinical trial protocol data found in document.");
       }
 
       setProtocol(data);
@@ -105,7 +91,6 @@ export default function Home() {
   const handleRank = async () => {
     setIsRanking(true);
     try {
-      // 1. Fetch Real Facilities from ClinicalTrials.gov
       const resSites = await fetch(`${API_BASE}/sites/rank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -115,7 +100,6 @@ export default function Home() {
       const dataSites = await resSites.json();
       setSites(dataSites.top_sites);
 
-      // 2. Fetch Synthea Database from Supabase
       const resPatients = await fetch(`${API_BASE}/participants/filter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -123,7 +107,9 @@ export default function Home() {
       });
       if (!resPatients.ok) throw new Error("Failed to query Supabase.");
       const dataPatients = await resPatients.json();
+      
       setPatientDistribution(dataPatients.distribution_by_state || {});
+      setSearchTerms(dataPatients.search_terms_used || []);
 
     } catch (error) {
       alert("Error linking to external APIs. Check backend console.");
@@ -170,11 +156,14 @@ export default function Home() {
 
   if (!mounted) return null;
 
+  const totalPatients = Object.values(patientDistribution).reduce((a, b) => a + b, 0);
+  const maxPatientsInAState = Math.max(...Object.values(patientDistribution), 1);
+
   return (
     <div className="flex h-screen bg-gray-100 text-gray-900 font-sans overflow-hidden">
       
       {/* SIDEBAR NAVIGATION */}
-      <aside className="w-64 bg-white border-r shadow-sm p-6 flex flex-col justify-between">
+      <aside className="w-64 bg-white border-r shadow-sm p-6 flex flex-col justify-between z-10">
         <div>
           <h1 className="text-xl font-bold text-blue-900 mb-8 leading-tight">Study Start-Up<br/><span className="text-sm font-normal text-gray-500">Acceleration Platform</span></h1>
           <nav className="space-y-2">
@@ -241,7 +230,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* VIEW 2: SITE SELECTION & FEASIBILITY MAP */}
+        {/* VIEW 2: SITE SELECTION & FEASIBILITY */}
         {activeView === "sites" && (
           <div className="max-w-6xl">
             <div className="flex justify-between items-center mb-6">
@@ -254,78 +243,64 @@ export default function Home() {
                 disabled={isRanking}
                 className="bg-indigo-600 disabled:bg-indigo-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition flex items-center"
               >
-                {isRanking ? "Connecting to Live Databases..." : "Run Feasibility Engine"}
+                {isRanking ? "Executing AI Relational Search..." : "Run Feasibility Engine"}
               </button>
             </div>
 
             {isRanking ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
                  <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-indigo-500 mb-6"></div>
-                 <h3 className="text-xl font-bold text-indigo-900 mb-2">Live Data Aggregation</h3>
-                 <p className="text-gray-500 max-w-md mb-2">1. Pinging ClinicalTrials.gov API for real hospitals researching <strong>"{protocol?.indication || 'the indication'}"</strong>...</p>
-                 <p className="text-gray-500 max-w-md">2. Executing SQL joins on Supabase cloud to map patient demographics...</p>
+                 <h3 className="text-xl font-bold text-indigo-900 mb-2">AI-Powered Feasibility Analysis</h3>
+                 <p className="text-gray-500 max-w-md mb-2">1. Groq is converting clinical inclusion criteria into EHR search terms...</p>
+                 <p className="text-gray-500 max-w-md">2. Executing relational SQL joins on Supabase `conditions` and `patients` tables...</p>
               </div>
             ) : sites.length > 0 && (
               <>
-                <div className="grid grid-cols-3 gap-6 mb-8">
-                  <div className="col-span-2 bg-white rounded shadow-sm border p-4 flex flex-col items-center">
-                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap (Powered by Supabase)</h3>
-                    <div className="w-full flex justify-center items-center overflow-hidden bg-white">
-                      <ComposableMap projection="geoAlbersUsa" width={800} height={450} style={{ width: "100%", height: "auto", maxHeight: "400px" }}>
-                        <Geographies geography={geoUrl}>
-                          {({ geographies }) =>
-                            geographies.map((geo) => {
-                              // Safely resolve the state abbreviation via FIPS or Name
-                              const stateAbbr = fipsToAbbr[geo.id] || Object.keys(stateNames).find(key => stateNames[key] === geo.properties.name);
-                              
-                              const patientCount = stateAbbr ? (patientDistribution[stateAbbr] || 0) : 0;
-                              const maxPatients = Math.max(...Object.values(patientDistribution), 1);
-                              
-                              const opacity = patientCount > 0 ? 0.2 + (0.8 * (patientCount / maxPatients)) : 0;
-                              const fill = patientCount > 0 ? `rgba(79, 70, 229, ${opacity})` : "#F3F4F6";
-
-                              return (
-                                <Geography 
-                                  key={geo.rsmKey} 
-                                  geography={geo} 
-                                  fill={fill} // Force explicit fill for robust rendering
-                                  style={{
-                                    default: { fill: fill, outline: "none", transition: "all 250ms" },
-                                    hover: { fill: patientCount > 0 ? "#4338CA" : "#D1D5DB", outline: "none", cursor: "pointer", transition: "all 250ms" },
-                                    pressed: { fill: "#3730A3", outline: "none" }
-                                  }}
-                                  stroke="#D1D5DB" 
-                                  strokeWidth={0.5} 
-                                />
-                              );
-                            })
-                          }
-                        </Geographies>
+                <div className="grid grid-cols-4 gap-6 mb-8">
+                  <div className="col-span-3 bg-white rounded shadow-sm border p-6">
+                    <div className="flex justify-between items-end mb-4">
+                      <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider">Geographic Patient Density Heat-Grid</h3>
+                      {searchTerms.length > 0 && (
+                        <div className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full border border-indigo-100">
+                           <strong>AI Filters Applied:</strong> {searchTerms.join(", ")}
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="grid grid-cols-4 gap-4">
+                      {DEMO_TARGET_STATES.map(stateAbbr => {
+                        const count = patientDistribution[stateAbbr] || 0;
+                        const intensity = count > 0 ? (count / maxPatientsInAState) : 0;
                         
-                        {selectedSites.map(siteId => {
-                           const site = sites.find(s => s.site.site_id === siteId)?.site;
-                           if (!site || !stateCoords[site.location.state]) return null;
-                           const jitterX = (Math.random() - 0.5) * 2.0;
-                           const jitterY = (Math.random() - 0.5) * 2.0;
-                           return (
-                             <Marker key={siteId} coordinates={[stateCoords[site.location.state][0] + jitterX, stateCoords[site.location.state][1] + jitterY]}>
-                               <circle r={6} fill="#EF4444" stroke="#FFFFFF" strokeWidth={1.5} />
-                             </Marker>
-                           );
-                        })}
-                      </ComposableMap>
+                        let bgClass = "bg-gray-50 border-gray-200";
+                        if (intensity > 0) bgClass = "bg-indigo-100 border-indigo-200 text-indigo-900";
+                        if (intensity > 0.4) bgClass = "bg-indigo-300 border-indigo-400 text-indigo-900";
+                        if (intensity > 0.7) bgClass = "bg-indigo-500 border-indigo-600 text-white";
+                        if (intensity > 0.9) bgClass = "bg-indigo-700 border-indigo-800 text-white";
+
+                        return (
+                          <div key={stateAbbr} className={`p-4 rounded-lg border transition-all duration-300 flex flex-col justify-between h-24 ${bgClass}`}>
+                            <span className="font-bold text-lg opacity-90">{stateAbbr}</span>
+                            <div className="flex justify-between items-end">
+                               <span className="text-xs font-medium uppercase opacity-75 truncate pr-2">{stateNames[stateAbbr]}</span>
+                               <span className="text-2xl font-black">{count}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
+
                   <div className="col-span-1 bg-white rounded shadow-sm border p-6 flex flex-col justify-center">
                     <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-4">Feasibility Stats</h3>
                     <div className="space-y-4">
                         <div>
-                            <p className="text-3xl font-black text-indigo-600">{Object.values(patientDistribution).reduce((a, b) => a + b, 0)}</p>
-                            <p className="text-sm text-gray-600">Real Patients (Supabase)</p>
+                            <p className="text-4xl font-black text-indigo-600">{totalPatients}</p>
+                            <p className="text-sm text-gray-600 font-medium mt-1">Total Eligible Patients</p>
                         </div>
-                        <div>
+                        <div className="pt-4 border-t">
                             <p className="text-3xl font-black text-red-500">{selectedSites.length}</p>
-                            <p className="text-sm text-gray-600">Selected Sites</p>
+                            <p className="text-sm text-gray-600 font-medium mt-1">Selected Sites</p>
                         </div>
                     </div>
                   </div>
@@ -345,28 +320,28 @@ export default function Home() {
                     <tbody>
                       {sites.map((s) => (
                         <React.Fragment key={s.site.site_id}>
-                          <tr className="border-b hover:bg-gray-50 transition">
+                          <tr className={`border-b hover:bg-gray-50 transition cursor-pointer ${selectedSites.includes(s.site.site_id) ? 'bg-indigo-50/50' : ''}`}>
                             <td className="p-4">
-                              <input type="checkbox" className="w-4 h-4 cursor-pointer text-indigo-600"
+                              <input type="checkbox" className="w-4 h-4 cursor-pointer text-indigo-600 rounded border-gray-300 focus:ring-indigo-500"
                                 checked={selectedSites.includes(s.site.site_id)}
                                 onChange={() => toggleSite(s.site.site_id)} 
                               />
                             </td>
-                            <td className="p-4 font-medium text-blue-800 cursor-pointer" onClick={() => setExpandedSite(expandedSite === s.site.site_id ? null : s.site.site_id)}>
-                              {s.site.name} <span className="text-xs text-gray-400 ml-2">(Click details)</span>
+                            <td className="p-4 font-medium text-indigo-900" onClick={() => setExpandedSite(expandedSite === s.site.site_id ? null : s.site.site_id)}>
+                              {s.site.name} <span className="text-xs text-indigo-400 ml-2 font-normal hover:underline">(Click details)</span>
                             </td>
-                            <td className="p-4 capitalize">{s.site.organization_type}</td>
-                            <td className="p-4">{s.site.location.state}</td>
-                            <td className="p-4 font-bold text-green-600">{(s.score * 100).toFixed(0)}%</td>
+                            <td className="p-4 capitalize text-gray-600">{s.site.organization_type}</td>
+                            <td className="p-4 font-medium">{s.site.location.state}</td>
+                            <td className="p-4 font-bold text-emerald-600">{(s.score * 100).toFixed(0)}%</td>
                           </tr>
                           
                           {expandedSite === s.site.site_id && (
-                            <tr className="bg-indigo-50 border-b">
+                            <tr className="bg-gray-50 border-b shadow-inner">
                                 <td colSpan={5} className="p-6">
                                   <div className="grid grid-cols-2 gap-8 text-sm">
                                     <div>
-                                      <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Score Explainability Breakdown</h4>
-                                      <ul className="space-y-1 text-gray-700 list-disc list-inside">
+                                      <h4 className="font-bold text-gray-900 mb-2 uppercase text-xs tracking-wider">Score Explainability Breakdown</h4>
+                                      <ul className="space-y-1 text-gray-600 list-disc list-inside">
                                         <li><strong>Historical Enrollment (40%):</strong> Scored {(s.breakdown.enrollment_rate_component * 100).toFixed(1)}%.</li>
                                         <li><strong>Patient Availability (30%):</strong> Scored {(s.breakdown.patient_availability_component * 100).toFixed(1)}%.</li>
                                         <li><strong>Therapeutic Match (20%):</strong> Scored {(s.breakdown.therapeutic_match_component * 100).toFixed(1)}%.</li>
@@ -374,9 +349,9 @@ export default function Home() {
                                       </ul>
                                     </div>
                                     <div>
-                                      <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Site Capabilities & Metadata</h4>
-                                      <div className="grid grid-cols-2 gap-2 text-gray-700">
-                                        <p><strong>NPI:</strong> {s.site.npi}</p>
+                                      <h4 className="font-bold text-gray-900 mb-2 uppercase text-xs tracking-wider">Site Capabilities & Metadata</h4>
+                                      <div className="grid grid-cols-2 gap-3 text-gray-600 bg-white p-3 rounded border">
+                                        <p><strong>NPI:</strong> <span className="font-mono text-xs">{s.site.npi}</span></p>
                                         <p><strong>City:</strong> {s.site.location.city}</p>
                                         <p><strong>Specialty:</strong> {s.site.specialty}</p>
                                         <p><strong>Avg Activation:</strong> {s.site.metrics.activation_time_days} days</p>
