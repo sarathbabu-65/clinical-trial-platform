@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 pydantic
-faker
 python-docx
 python-multipart
 PyPDF2
 groq
+supabase
+requests

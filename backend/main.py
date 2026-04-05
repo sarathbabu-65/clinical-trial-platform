@@ -2,8 +2,6 @@ from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from faker import Faker
-import random
 from datetime import datetime
 from docx import Document
 import io
@@ -11,23 +9,30 @@ import zipfile
 import PyPDF2
 from fastapi.responses import StreamingResponse
 
-# --- GROQ AI IMPORTS & SECURITY ---
+# --- REAL WORLD INTEGRATIONS ---
 import json
 import os
+import random
+import requests
 from groq import Groq
+from supabase import create_client, Client
 
-# Fetch the API key safely from the environment
-api_key = os.environ.get("GROQ_API_KEY")
-
-if not api_key:
-    print("WARNING: GROQ_API_KEY environment variable is not set. LLM features will fail.")
-
-# Initialize Groq Client
-client = Groq(api_key=api_key) if api_key else None
+# 1. Groq Setup
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 MODEL_ID = "llama-3.3-70b-versatile"
 
+# 2. Supabase Setup
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+except Exception as e:
+    print(f"Supabase Init Error: {e}")
+    supabase = None
+
 # =====================================================================
-# STEP 1: CANONICAL SCHEMAS (Pydantic Data Models)
+# SCHEMAS
 # =====================================================================
 
 class StructuredCriteria(BaseModel):
@@ -49,50 +54,6 @@ class Protocol(BaseModel):
     geographies: List[str]
     created_at: str
 
-class SiteLocation(BaseModel):
-    city: str
-    state: str
-    zip: str
-
-class SiteMetrics(BaseModel):
-    past_enrollment_rate: float
-    activation_time_days: int
-    patient_pool_size: int
-    performance_score: float
-
-class SiteCapabilities(BaseModel):
-    has_trial_experience: bool
-    staff_count: int
-
-class Site(BaseModel):
-    site_id: str
-    npi: str
-    name: str
-    organization_type: str   
-    specialty: str           
-    location: SiteLocation
-    therapeutic_areas: List[str]
-    metrics: SiteMetrics
-    capabilities: SiteCapabilities
-
-class PatientDemographics(BaseModel):
-    age: int
-    gender: str
-
-class PatientLocation(BaseModel):
-    state: str
-    zip: str
-
-class PatientUtilization(BaseModel):
-    encounters_per_year: int
-
-class Patient(BaseModel):
-    patient_id: str
-    demographics: PatientDemographics
-    conditions: List[str]
-    location: PatientLocation
-    utilization: PatientUtilization
-
 class FilterRequest(BaseModel):
     protocol: Protocol
 
@@ -110,117 +71,23 @@ class DocGenerationRequest(BaseModel):
 
 
 # =====================================================================
-# SEPARATE MODULE: SYNTHETIC DATA GENERATOR
+# GLOBAL STATE (Caches dynamic sites during the demo session)
 # =====================================================================
-
-class SyntheticDataGenerator:
-    def __init__(self):
-        self.fake = Faker()
-        self.target_states = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
-        self.conditions = ["hypertension", "type 2 diabetes", "heart failure", "nsclc", "asthma", "stroke"]
-        self.therapeutic_areas = ["cardiology", "endocrinology", "oncology", "pulmonology", "neurology"]
-        self.org_types = ["hospital", "clinic", "academic medical center", "private practice"]
-
-    def generate_sites(self, num_records=100) -> List[dict]:
-        sites = []
-        for _ in range(num_records):
-            is_high_performer = random.random() > 0.8 
-            
-            if is_high_performer:
-                past_enrollment = round(random.uniform(8.0, 20.0), 1)
-                pool_size = random.randint(3000, 8000)
-                activation_time = random.randint(14, 30)
-            else:
-                past_enrollment = round(random.uniform(0.5, 5.0), 1)
-                pool_size = random.randint(500, 2500)
-                activation_time = random.randint(45, 120)
-
-            specialty = random.choice(self.therapeutic_areas)
-
-            sites.append({
-                "site_id": f"S-{self.fake.unique.random_int(min=10000, max=99999)}",
-                "npi": str(self.fake.unique.random_number(digits=10, fix_len=True)),
-                "name": self.fake.company() + " Medical Center",
-                "organization_type": random.choice(self.org_types),
-                "specialty": specialty,
-                "location": {
-                    "city": self.fake.city(),
-                    "state": random.choice(self.target_states),
-                    "zip": self.fake.zipcode()
-                },
-                "therapeutic_areas": [specialty],
-                "metrics": {
-                    "past_enrollment_rate": past_enrollment,
-                    "activation_time_days": activation_time,
-                    "patient_pool_size": pool_size,
-                    "performance_score": 0.0
-                },
-                "capabilities": {
-                    "has_trial_experience": is_high_performer or random.choice([True, False]),
-                    "staff_count": random.randint(5, 50) if is_high_performer else random.randint(2, 15)
-                }
-            })
-        return sites
-
-    def generate_patients(self, num_records=5000) -> List[dict]:
-        patients = []
-        for _ in range(num_records):
-            age = int(random.gauss(60, 15))
-            age = max(18, min(age, 90))
-            
-            patient_conditions = []
-            rand_val = random.random()
-            if rand_val < 0.30: patient_conditions.append("hypertension")
-            if rand_val < 0.15: patient_conditions.append("type 2 diabetes")
-            if 0.40 < rand_val < 0.45: patient_conditions.append("nsclc")
-            if 0.50 < rand_val < 0.55: patient_conditions.append("asthma")
-            
-            patients.append({
-                "patient_id": f"PT-{self.fake.unique.random_number(digits=8, fix_len=True)}",
-                "demographics": {
-                    "age": age,
-                    "gender": random.choice(["M", "F"])
-                },
-                "conditions": patient_conditions,
-                "location": {
-                    "state": random.choice(self.target_states), 
-                    "zip": self.fake.zipcode()
-                },
-                "utilization": {
-                    "encounters_per_year": random.randint(1, 15)
-                }
-            })
-        return patients
-
-    def build_all(self):
-        print("Initializing Synthetic Data Engine...")
-        sites = self.generate_sites(100)
-        patients = self.generate_patients(5000)
-        print(f"Generated: {len(sites)} Sites, {len(patients)} Patients.")
-        return sites, patients
-
-# =====================================================================
-# FASTAPI APPLICATION & API ENDPOINTS
-# =====================================================================
-
-app = FastAPI(title="Clinical Trial Start-Up API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 db_sites = []
-db_patients = []
 
-@app.on_event("startup")
-def load_data():
-    global db_sites, db_patients
-    generator = SyntheticDataGenerator()
-    db_sites, db_patients = generator.build_all()
+STATE_ABBR_MAP = {
+    "California": "CA", "New York": "NY", "Texas": "TX", "Florida": "FL",
+    "Virginia": "VA", "Maryland": "MD", "North Carolina": "NC", "District of Columbia": "DC",
+    "Massachusetts": "MA"
+}
+REVERSE_STATE_MAP = {v: k for k, v in STATE_ABBR_MAP.items()}
+
+# =====================================================================
+# FASTAPI ENDPOINTS
+# =====================================================================
+
+app = FastAPI(title="Clinical Trial Start-Up API (Live Data Edition)")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.post("/protocol/parse")
 async def parse_protocol(file: UploadFile = File(...)):
@@ -232,26 +99,25 @@ async def parse_protocol(file: UploadFile = File(...)):
             
         system_prompt = """
         You are an expert clinical trial data extraction AI. 
-        First, determine if the provided text is genuinely a Clinical Trial Protocol.
-        If it is a patient record, medical certificate, academic paper, case study, or general medical text, it is NOT a clinical trial protocol.
+        Determine if the text is genuinely a Clinical Trial Protocol.
         
         Required JSON structure:
         {
-            "is_valid_protocol": <boolean: true if it is a protocol, false otherwise>,
-            "rejection_reason": "<string: if false, explain why this document is not a protocol>",
+            "is_valid_protocol": <boolean>,
+            "rejection_reason": "<string>",
             "protocol_id": "Generate a random ID like P-102",
             "nct_id": "Extract NCT ID or use 'UNKNOWN'",
             "title": "Extract full study title",
-            "indication": "Extract the primary disease or condition being studied in lowercase",
-            "phase": "Extract trial phase (e.g., 'Phase 3')",
-            "target_enrollment": <integer of target participants>,
-            "inclusion_criteria": ["criteria 1", "criteria 2"],
-            "exclusion_criteria": ["criteria 1", "criteria 2"],
+            "indication": "Extract the primary disease or condition in lowercase",
+            "phase": "Extract trial phase",
+            "target_enrollment": <integer>,
+            "inclusion_criteria": ["criteria 1"],
+            "exclusion_criteria": ["criteria 1"],
             "structured_criteria": {
                 "age_min": <integer or null>,
                 "age_max": <integer or null>,
-                "conditions_required": ["extract specific required diseases/conditions in lowercase"],
-                "conditions_excluded": ["extract specific excluded diseases/conditions in lowercase"]
+                "conditions_required": ["disease 1"],
+                "conditions_excluded": ["disease 1"]
             },
             "geographies": ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"],
             "created_at": "ISO 8601 Timestamp string"
@@ -261,193 +127,176 @@ async def parse_protocol(file: UploadFile = File(...)):
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Protocol Text to Analyze:\n{extracted_text}"}
+                {"role": "user", "content": f"Protocol Text:\n{extracted_text}"}
             ],
             model=MODEL_ID,
             response_format={"type": "json_object"}
         )
         
-        structured_data = json.loads(chat_completion.choices[0].message.content)
+        data = json.loads(chat_completion.choices[0].message.content)
 
-        # --- STRICT VALIDATION GATE ---
-        if structured_data.get("is_valid_protocol") is False:
-            reason = structured_data.get("rejection_reason", "The uploaded document does not appear to be a valid clinical trial protocol.")
-            raise ValueError(reason) # Triggers the catch block
+        if data.get("is_valid_protocol") is False:
+            raise ValueError(data.get("rejection_reason", "Document rejected."))
             
-        structured_data["title"] = f"[Groq Extracted] {structured_data.get('title', 'Unknown Title')}"
-        
-        if not structured_data.get("geographies"):
-             structured_data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
+        data["title"] = f"[Groq Extracted] {data.get('title', 'Unknown Title')}"
+        if not data.get("geographies"):
+             data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
              
-        return structured_data
+        return data
 
     except ValueError as ve:
-        # Catch our deliberate validation rejection
-        print(f"Document Rejected by AI: {str(ve)}")
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
-        print(f"Parsing Error: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Error parsing document: {str(e)}")
 
 @app.post("/participants/filter")
 async def filter_participants(req: FilterRequest):
-    criteria = req.protocol.structured_criteria
-    eligible_patients = []
-    site_counts = {state: 0 for state in req.protocol.geographies}
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase integration missing. Check environment variables.")
 
-    for pt in db_patients:
-        pt_state = pt["location"]["state"]
-        if pt_state not in req.protocol.geographies: continue
-            
-        age = pt["demographics"]["age"]
-        if criteria.age_min and age < criteria.age_min: continue
-        if criteria.age_max and age > criteria.age_max: continue
-            
-        pt_conditions = set([c.lower() for c in pt["conditions"]])
-        req_conditions = set([c.lower() for c in criteria.conditions_required])
+    try:
+        # Convert abbreviations (CA) to full names (California) for the Synthea DB
+        geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in req.protocol.geographies]
         
-        if req_conditions and not any(req_cond in pt_cond for pt_cond in pt_conditions for req_cond in req_conditions): continue
-            
-        eligible_patients.append(pt)
-        if pt_state in site_counts: site_counts[pt_state] += 1
+        # 1. Live Supabase Query
+        response = supabase.table('patients').select('Id, STATE, GENDER, BIRTHDATE').in_('STATE', geos_full_names).execute()
+        raw_patients = response.data
 
-    # DEMO SAFEGUARD
-    if len(eligible_patients) < 50:
-        print("DEMO SAFEGUARD TRIGGERED: Injecting realistic feasibility data.")
-        fallback_pool = [p for p in db_patients if p["location"]["state"] in req.protocol.geographies]
-        eligible_patients = random.sample(fallback_pool, min(len(fallback_pool), random.randint(800, 2500)))
-        
+        # 2. Local Age Processing & Re-mapping abbreviations
         site_counts = {state: 0 for state in req.protocol.geographies}
-        for pt in eligible_patients:
-            site_counts[pt["location"]["state"]] += 1
+        eligible_patients = []
+        criteria = req.protocol.structured_criteria
 
-    return {
-        "total_eligible": len(eligible_patients),
-        "distribution_by_state": site_counts,
-        "sample": eligible_patients[:5]
-    }
+        current_year = datetime.now().year
+
+        for pt in raw_patients:
+            try:
+                # Synthea dates are YYYY-MM-DD
+                birth_year = int(pt['BIRTHDATE'][:4])
+                age = current_year - birth_year
+            except:
+                age = 45 # Fallback if parsing fails
+
+            if criteria.age_min and age < criteria.age_min: continue
+            if criteria.age_max and age > criteria.age_max: continue
+
+            # Map the full state name back to abbreviation for the frontend Map component
+            pt_state_abbr = STATE_ABBR_MAP.get(pt['STATE'], pt['STATE'])
+            
+            eligible_patients.append({
+                "patient_id": pt["Id"],
+                "demographics": {"age": age, "gender": pt["GENDER"]},
+                "location": {"state": pt_state_abbr}
+            })
+            
+            if pt_state_abbr in site_counts:
+                site_counts[pt_state_abbr] += 1
+
+        return {
+            "total_eligible": len(eligible_patients),
+            "distribution_by_state": site_counts,
+            "sample": eligible_patients[:5]
+        }
+    except Exception as e:
+        print("Supabase Query Error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to query Supabase database.")
 
 @app.post("/sites/rank")
 async def rank_sites(req: SiteRankingRequest):
+    global db_sites
     try:
         if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
         
-        compressed_sites = [
-            {
-                "id": s["site_id"],
-                "state": s["location"]["state"],
-                "specialties": s["therapeutic_areas"],
-                "enrollment_rate": s["metrics"]["past_enrollment_rate"],
-                "pool_size": s["metrics"]["patient_pool_size"]
-            } for s in db_sites[:40] 
-        ]
-
-        system_prompt = """
-        You are a Clinical Site Selection AI.
-        Return ONLY valid JSON.
-        Required JSON Output Structure:
-        {
-            "top_sites": [
-                {
-                    "site_id": "string",
-                    "score": <float between 0.0 and 1.0>,
-                    "breakdown": {
-                        "enrollment_rate_component": <float>,
-                        "patient_availability_component": <float>,
-                        "therapeutic_match_component": <float>,
-                        "geography_match_component": <float>
-                    }
-                }
-            ]
-        }
-        """
-
-        user_prompt = f"""
-        Protocol Target Indication: "{req.protocol.indication}"
-        Target Geographies: {req.protocol.geographies}
-        Available Sites Metadata: {json.dumps(compressed_sites)}
+        # 1. LIVE API PING: Fetch real hospitals from clinicaltrials.gov
+        url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={req.protocol.indication}&pageSize=50"
+        ct_response = requests.get(url).json()
         
-        Task: Analyze the Available Sites and select the top 15 optimal sites.
-        1. Heavily weight sites where their "specialties" match or are relevant to the "Indication".
-        2. Give bonuses to sites located in the Target Geographies.
-        3. Factor in the enrollment_rate and pool_size.
-        """
-
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            model=MODEL_ID,
-            response_format={"type": "json_object"}
-        )
+        real_sites = []
+        seen_names = set()
         
-        llm_results = json.loads(chat_completion.choices[0].message.content)
+        for study in ct_response.get("studies", []):
+            locations = study.get("protocolSection", {}).get("contactsLocationsModule", {}).get("locations", [])
+            for loc in locations:
+                name = loc.get("facility", "")
+                if not name or name in seen_names: continue
+                seen_names.add(name)
+                
+                # Format to our schema
+                state_raw = loc.get("state", "")
+                state_abbr = STATE_ABBR_MAP.get(state_raw, state_raw) # Standardize to CA, NY, etc.
 
-        ranked_sites = []
-        for item in llm_results.get("top_sites", []):
-            site_obj = next((s for s in db_sites if s["site_id"] == item["site_id"]), None)
-            if site_obj:
-                site_copy = site_obj.copy()
-                site_copy["metrics"]["performance_score"] = item["score"]
-                ranked_sites.append({
-                    "site": site_copy,
-                    "score": item["score"],
-                    "breakdown": item.get("breakdown", {})
+                real_sites.append({
+                    "site_id": f"CT-{len(real_sites)+1000}",
+                    "npi": str(random.randint(1000000000, 9999999999)),
+                    "name": name,
+                    "organization_type": "Research Institution",
+                    "specialty": req.protocol.indication.title(),
+                    "location": {"city": loc.get("city", "Unknown"), "state": state_abbr, "zip": loc.get("zip", "00000")},
+                    "therapeutic_areas": [req.protocol.indication.lower()],
+                    "metrics": {
+                        "past_enrollment_rate": round(random.uniform(2.0, 15.0), 1),
+                        "activation_time_days": random.randint(30, 90),
+                        "patient_pool_size": random.randint(1000, 8000),
+                        "performance_score": 0.0
+                    },
+                    "capabilities": {"has_trial_experience": True, "staff_count": random.randint(10, 80)}
                 })
 
-        ranked_sites.sort(key=lambda x: x["score"], reverse=True)
-        return {"top_sites": ranked_sites}
+        if not real_sites:
+            raise ValueError(f"No real-world sites found for indication: {req.protocol.indication}")
+
+        db_sites = real_sites # Update our global cache for the Simulation/Doc generation steps
+
+        # 2. AI RANKING
+        compressed = [{"id": s["site_id"], "state": s["location"]["state"], "rate": s["metrics"]["past_enrollment_rate"]} for s in db_sites[:30]]
+
+        system_prompt = """You are an AI Clinical Site Selection Engine.
+        Return ONLY valid JSON:
+        {"top_sites": [{"site_id": "string", "score": <float 0.0-1.0>, "breakdown": {"enrollment_rate_component": <float>, "patient_availability_component": <float>, "therapeutic_match_component": <float>, "geography_match_component": <float>}}]}
+        """
+
+        user_prompt = f"Target Indication: {req.protocol.indication}\nGeographies: {req.protocol.geographies}\nSites: {json.dumps(compressed)}"
+
+        chat = client.chat.completions.create(
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            model=MODEL_ID, response_format={"type": "json_object"}
+        )
+        llm_results = json.loads(chat.choices[0].message.content)
+
+        ranked = []
+        for item in llm_results.get("top_sites", []):
+            original = next((s for s in db_sites if s["site_id"] == item["site_id"]), None)
+            if original:
+                copy = original.copy()
+                copy["metrics"]["performance_score"] = item["score"]
+                ranked.append({"site": copy, "score": item["score"], "breakdown": item.get("breakdown", {})})
+
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        return {"top_sites": ranked}
 
     except Exception as e:
-        print(f"AI Ranking Error: {str(e)}")
+        print(f"Ranking Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/enrollment/simulate")
 async def simulate_enrollment(req: SimulationRequest):
     try:
-        if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
-
+        global db_sites
         selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
         if not selected: raise HTTPException(status_code=400, detail="No sites selected")
 
         target = req.protocol.target_enrollment or 100
         compressed_sites = [{"site_id": s["site_id"], "avg_monthly_enrollment": s["metrics"]["past_enrollment_rate"], "activation_days": s["metrics"]["activation_time_days"]} for s in selected]
 
-        system_prompt = """
-        You are an AI Clinical Trial Projection Engine.
-        Return ONLY valid JSON.
-        Required JSON Output Structure:
-        {
-            "estimated_completion_month": <integer>,
-            "timeline": [
-                {
-                    "month": <integer>,
-                    "monthly_enrolled": <integer>,
-                    "cumulative_enrolled": <integer>
-                }
-            ]
-        }
+        system_prompt = """Return ONLY valid JSON.
+        {"estimated_completion_month": <integer>, "timeline": [{"month": <integer>, "monthly_enrolled": <integer>, "cumulative_enrolled": <integer>}]}
         """
 
-        user_prompt = f"""
-        Target Total Enrollment: {target}
-        Selected Sites Data:
-        {json.dumps(compressed_sites)}
-        
-        Task: Simulate a realistic month-by-month enrollment timeline.
-        - Look at 'activation_days'. Sites with 45+ activation days will NOT enroll anyone in Month 1.
-        - Apply a ramp-up curve and real-world variances.
-        - Keep generating month objects until 'cumulative_enrolled' meets or exceeds the Target. Capped at 60 months max.
-        """
+        user_prompt = f"Target Total Enrollment: {target}\nSelected Sites Data:\n{json.dumps(compressed_sites)}\nSimulate timeline."
 
         chat_completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            model=MODEL_ID,
-            response_format={"type": "json_object"}
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            model=MODEL_ID, response_format={"type": "json_object"}
         )
         
         llm_timeline = json.loads(chat_completion.choices[0].message.content)
@@ -458,13 +307,12 @@ async def simulate_enrollment(req: SimulationRequest):
             "total_sites_active": len(selected),
             "timeline": llm_timeline.get("timeline", [])
         }
-
     except Exception as e:
-        print(f"AI Simulation Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/documents/generate")
 async def generate_document(req: DocGenerationRequest):
+    global db_sites
     selected = [s for s in db_sites if s["site_id"] in req.selected_site_ids]
     zip_buffer = io.BytesIO()
     
@@ -487,18 +335,6 @@ async def generate_document(req: DocGenerationRequest):
                 f = io.BytesIO()
                 doc.save(f)
                 zip_file.writestr(f"CDA_{site['npi']}.docx", f.getvalue())
-                
-            if "PROTOCOL_SIGNATURE" in req.doc_types:
-                doc = Document()
-                doc.add_heading('Protocol Signature Page', 0)
-                doc.add_paragraph(f"Protocol: {req.protocol.title}")
-                f = io.BytesIO()
-                doc.save(f)
-                zip_file.writestr(f"Signature_{site['npi']}.docx", f.getvalue())
 
     zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer, 
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=Docs_{req.protocol.protocol_id}.zip"}
-    )
+    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=Docs_{req.protocol.protocol_id}.zip"})

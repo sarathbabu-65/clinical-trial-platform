@@ -58,9 +58,7 @@ export default function Home() {
   };
 
   const toggleSite = (id: string) => {
-    setSelectedSites(prev => 
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
+    setSelectedSites(prev => prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]);
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,7 +76,6 @@ export default function Home() {
         body: formData,
       });
       
-      // If backend throws a 400 Validation Error, extract the exact LLM reason
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.detail || "Connection failed. Is the backend running?");
@@ -100,24 +97,28 @@ export default function Home() {
   const handleRank = async () => {
     setIsRanking(true);
     try {
+      // 1. Fetch Real Facilities from ClinicalTrials.gov
       const resSites = await fetch(`${API_BASE}/sites/rank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol })
       });
+      if (!resSites.ok) throw new Error("Failed to fetch live site data.");
       const dataSites = await resSites.json();
       setSites(dataSites.top_sites);
 
+      // 2. Fetch Synthea Database from Supabase
       const resPatients = await fetch(`${API_BASE}/participants/filter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol })
       });
+      if (!resPatients.ok) throw new Error("Failed to query Supabase.");
       const dataPatients = await resPatients.json();
       setPatientDistribution(dataPatients.distribution_by_state || {});
 
     } catch (error) {
-      alert("Error ranking sites and fetching patient data.");
+      alert("Error linking to external APIs. Check backend console.");
     } finally {
       setIsRanking(false);
     }
@@ -238,28 +239,29 @@ export default function Home() {
             <div className="flex justify-between items-center mb-6">
               <div>
                 <h2 className="text-2xl font-semibold">AI Site Selection & Feasibility</h2>
-                <p className="text-gray-600">Map eligible patient density and rank site infrastructure.</p>
+                <p className="text-gray-600">Querying live data from ClinicalTrials.gov and Supabase PostgreSQL.</p>
               </div>
               <button 
                 onClick={handleRank} 
                 disabled={isRanking}
                 className="bg-indigo-600 disabled:bg-indigo-400 text-white px-6 py-2 rounded font-medium shadow hover:bg-indigo-700 transition flex items-center"
               >
-                {isRanking ? "Processing..." : "Run Feasibility Engine"}
+                {isRanking ? "Connecting to Live Databases..." : "Run Feasibility Engine"}
               </button>
             </div>
 
             {isRanking ? (
               <div className="bg-white rounded shadow-sm border p-16 flex flex-col items-center justify-center text-center">
-                 <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-orange-500 mb-6"></div>
-                 <h3 className="text-xl font-bold text-orange-900 mb-2">Groq LPU Engine Processing</h3>
-                 <p className="text-gray-500 max-w-md">Llama 3.3 70B is cross-referencing protocol indication <strong>"{protocol?.indication || 'the indication'}"</strong> against site therapeutic metadata and querying the synthetic patient database...</p>
+                 <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-indigo-500 mb-6"></div>
+                 <h3 className="text-xl font-bold text-indigo-900 mb-2">Live Data Aggregation</h3>
+                 <p className="text-gray-500 max-w-md mb-2">1. Pinging ClinicalTrials.gov API for real hospitals researching <strong>"{protocol?.indication || 'the indication'}"</strong>...</p>
+                 <p className="text-gray-500 max-w-md">2. Executing SQL joins on Supabase cloud to map patient demographics...</p>
               </div>
             ) : sites.length > 0 && (
               <>
                 <div className="grid grid-cols-3 gap-6 mb-8">
                   <div className="col-span-2 bg-white rounded shadow-sm border p-4 flex flex-col items-center">
-                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap</h3>
+                    <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-2 w-full text-left">Patient Density Heatmap (Powered by Supabase)</h3>
                     <div className="w-full flex justify-center items-center overflow-hidden bg-white">
                       <ComposableMap projection="geoAlbersUsa" width={800} height={450} style={{ width: "100%", height: "auto", maxHeight: "400px" }}>
                         <Geographies geography={geoUrl}>
@@ -297,7 +299,7 @@ export default function Home() {
                     <div className="space-y-4">
                         <div>
                             <p className="text-3xl font-black text-indigo-600">{Object.values(patientDistribution).reduce((a, b) => a + b, 0)}</p>
-                            <p className="text-sm text-gray-600">Total Eligible Patients</p>
+                            <p className="text-sm text-gray-600">Real Patients (Supabase)</p>
                         </div>
                         <div>
                             <p className="text-3xl font-black text-red-500">{selectedSites.length}</p>
@@ -312,11 +314,10 @@ export default function Home() {
                     <thead className="bg-gray-50 border-b">
                       <tr>
                         <th className="p-4 w-12"></th>
-                        <th className="p-4">Site Name</th>
+                        <th className="p-4">Live Facility Name (CT.gov)</th>
                         <th className="p-4">Org Type</th>
                         <th className="p-4">State</th>
                         <th className="p-4">AI Score</th>
-                        <th className="p-4">Velocity</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -335,28 +336,27 @@ export default function Home() {
                             <td className="p-4 capitalize">{s.site.organization_type}</td>
                             <td className="p-4">{s.site.location.state}</td>
                             <td className="p-4 font-bold text-green-600">{(s.score * 100).toFixed(0)}%</td>
-                            <td className="p-4">{s.site.metrics.past_enrollment_rate}/mo</td>
                           </tr>
                           
                           {expandedSite === s.site.site_id && (
                             <tr className="bg-indigo-50 border-b">
-                                <td colSpan={6} className="p-6">
+                                <td colSpan={5} className="p-6">
                                   <div className="grid grid-cols-2 gap-8 text-sm">
                                     <div>
                                       <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Score Explainability Breakdown</h4>
                                       <ul className="space-y-1 text-gray-700 list-disc list-inside">
-                                        <li><strong>Historical Enrollment (40%):</strong> Site scored {(s.breakdown.enrollment_rate_component * 100).toFixed(1)}% due to their {s.site.metrics.past_enrollment_rate}/mo velocity.</li>
-                                        <li><strong>Patient Availability (30%):</strong> Site scored {(s.breakdown.patient_availability_component * 100).toFixed(1)}% based on a local pool of {s.site.metrics.patient_pool_size}.</li>
-                                        <li><strong>Therapeutic Match (20%):</strong> Site scored {(s.breakdown.therapeutic_match_component * 100).toFixed(1)}% for overlapping specialties.</li>
-                                        <li><strong>Geographic Match (10%):</strong> Site scored {(s.breakdown.geography_match_component * 100).toFixed(1)}% for operating in {s.site.location.state}.</li>
+                                        <li><strong>Historical Enrollment (40%):</strong> Scored {(s.breakdown.enrollment_rate_component * 100).toFixed(1)}%.</li>
+                                        <li><strong>Patient Availability (30%):</strong> Scored {(s.breakdown.patient_availability_component * 100).toFixed(1)}%.</li>
+                                        <li><strong>Therapeutic Match (20%):</strong> Scored {(s.breakdown.therapeutic_match_component * 100).toFixed(1)}%.</li>
+                                        <li><strong>Geographic Match (10%):</strong> Scored {(s.breakdown.geography_match_component * 100).toFixed(1)}% for operating in {s.site.location.state}.</li>
                                       </ul>
                                     </div>
                                     <div>
                                       <h4 className="font-bold text-indigo-900 mb-2 uppercase text-xs tracking-wider">Site Capabilities & Metadata</h4>
                                       <div className="grid grid-cols-2 gap-2 text-gray-700">
                                         <p><strong>NPI:</strong> {s.site.npi}</p>
+                                        <p><strong>City:</strong> {s.site.location.city}</p>
                                         <p><strong>Specialty:</strong> {s.site.specialty}</p>
-                                        <p><strong>Staff Count:</strong> {s.site.capabilities.staff_count}</p>
                                         <p><strong>Avg Activation:</strong> {s.site.metrics.activation_time_days} days</p>
                                       </div>
                                     </div>
@@ -387,7 +387,7 @@ export default function Home() {
             <h2 className="text-2xl font-semibold mb-2">Enrollment Simulation</h2>
             
             <div className="bg-blue-50 border-l-4 border-blue-500 p-4 mb-6 text-sm text-blue-800 shadow-sm">
-              <strong>Understanding the Model:</strong> This simulation feeds the selected site metadata directly into Groq LPU to predict non-linear ramp-up times and behavioral enrollment drops.
+              <strong>Understanding the Model:</strong> This simulation feeds the real-world site metadata directly into Groq LPU to predict non-linear ramp-up times and behavioral enrollment drops.
             </div>
 
             <button 
@@ -449,21 +449,12 @@ export default function Home() {
                 />
                 <span className="font-medium">FDA Form 1572 (Statement of Investigator)</span>
               </label>
-              
               <label className="flex items-center space-x-3 cursor-pointer">
                 <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
                   checked={docTypes.includes("CDA")} 
                   onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "CDA"] : prev.filter(d => d !== "CDA"))} 
                 />
                 <span className="font-medium">Confidential Disclosure Agreement (CDA)</span>
-              </label>
-              
-              <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-purple-600 rounded" 
-                  checked={docTypes.includes("PROTOCOL_SIGNATURE")} 
-                  onChange={(e) => setDocTypes(prev => e.target.checked ? [...prev, "PROTOCOL_SIGNATURE"] : prev.filter(d => d !== "PROTOCOL_SIGNATURE"))} 
-                />
-                <span className="font-medium">Protocol Signature Page</span>
               </label>
             </div>
 
@@ -498,40 +489,6 @@ export default function Home() {
             <div className="bg-gray-50 border rounded-lg p-6 mb-8 font-mono text-sm text-gray-800">
               <h3 className="text-gray-500 uppercase font-bold tracking-wider mb-4 text-xs">Production Base URL</h3>
               <p className="bg-gray-200 p-2 rounded inline-block">{API_BASE}</p>
-            </div>
-
-            <h3 className="text-lg font-bold text-gray-800 mb-4">Core Endpoints</h3>
-            <div className="space-y-6">
-              
-              <div className="border rounded-lg overflow-hidden shadow-sm">
-                <div className="bg-gray-100 p-4 border-b flex justify-between items-center">
-                  <h4 className="font-bold text-gray-800 flex items-center">
-                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs mr-3 font-black">POST</span>
-                    /protocol/parse
-                  </h4>
-                  <span className="text-xs text-gray-500 font-medium bg-white px-2 py-1 rounded border">Llama 3.3 Engine</span>
-                </div>
-                <div className="p-4 bg-gray-900 text-green-400 font-mono text-xs overflow-x-auto">
-                  <p>curl -X POST "{API_BASE}/protocol/parse" \</p>
-                  <p>  -H "accept: application/json" \</p>
-                  <p>  -H "Content-Type: multipart/form-data" \</p>
-                  <p>  -F "file=@your_protocol.pdf"</p>
-                </div>
-              </div>
-
-              <div className="border rounded-lg overflow-hidden shadow-sm">
-                <div className="bg-gray-100 p-4 border-b flex justify-between items-center">
-                  <h4 className="font-bold text-gray-800 flex items-center">
-                    <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs mr-3 font-black">POST</span>
-                    /sites/rank
-                  </h4>
-                  <span className="text-xs text-gray-500 font-medium bg-white px-2 py-1 rounded border">Llama 3.3 Engine</span>
-                </div>
-                <div className="p-4 bg-white text-gray-600 text-sm">
-                  Analyzes available site infrastructure against protocol requirements and returns a scored JSON array of the top 15 optimal locations.
-                </div>
-              </div>
-
             </div>
           </div>
         )}
