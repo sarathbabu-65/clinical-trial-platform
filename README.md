@@ -1,74 +1,67 @@
 # AI-Enabled Clinical Trial Study Start-Up Acceleration Platform (POC)
 
-## Overview
-Clinical trial start-up—particularly site selection, feasibility assessment, and participant enrollment—is traditionally a slow, manual, and fragmented process. This Minimum Viable Product (MVP) transforms this workflow into a data-driven, predictive, and automated system. 
+An intelligent, cloud-native enterprise application designed to accelerate clinical trial feasibility and site selection. This platform bridges unstructured protocol PDFs with live site intelligence and highly relational patient demographic data to predict enrollment feasibility and automate study start-up artifacts.
 
-Built with an API-first architecture, this platform combines protocol intelligence, AI-driven site scoring, behavioral enrollment simulation, and document automation to dramatically reduce trial start-up times.
+## ✨ Key Features
 
-### Key Capabilities
-* **Protocol Intelligence:** Ingests unstructured clinical trial protocols (PDFs) and extracts structured criteria.
-* **AI Site Selection Engine:** Dynamically ranks clinical sites based on historical CMS/NPI metrics, patient availability, and therapeutic match.
-* **Enrollment Simulation:** Projects time-to-target enrollment using real-world behavioral realism, injecting ±20% site-level variance to account for operational friction.
-* **Activation Workflow Automation:** Automatically generates populated, compliance-ready `.docx` artifacts (e.g., FDA Form 1572, CDAs) bundled in a `.zip` archive.
+1. Protocol Intelligence: Upload a clinical trial protocol (PDF) to automatically extract structured criteria (Indication, Phase, Target Enrollment, Inclusion/Exclusion Criteria) using the Groq LPU engine.
+2. AI Site Selection: Pings the live ClinicalTrials.gov API to fetch real-world research facilities actively studying the extracted indication, mapped strictly to target US geographies.
+3. Patient Feasibility (EHR Integration): Groq translates complex clinical inclusion criteria into standard EHR search terms, executing relational fuzzy SQL joins (ilike) across a cloud-hosted Supabase database containing synthetic patient records. Results are visualized on a responsive Tailwind CSS Heat-Grid.
+4. Predictive Enrollment Simulation: Feeds real-world site metadata (past enrollment rates, activation delays) and target metrics into an LLM to generate a non-linear, CMS-pattern ramp-up timeline.
+5. Activation Workflow Automation: Dynamically injects protocol and site metadata into template artifacts (FDA 1572, CDAs) and bundles them into a downloadable .zip archive.
 
-## Tech Stack
-* **Frontend:** React, Next.js, Tailwind CSS
-* **Backend:** Python, FastAPI
-* **Data Processing:** PyPDF2 (Parsing), python-docx (Generation), Faker (Synthetic Data)
+## 🏗️ Architecture & Tech Stack
 
----
+* Frontend: Next.js (React), Tailwind CSS
+* Backend: FastAPI (Python), Uvicorn
+* Database: Supabase (PostgreSQL) - Hosting Synthea EHR data
+* AI / LLM Engine: Groq API (llama-3.3-70b-versatile)
+* External APIs: ClinicalTrials.gov API (v2)
+* Document Processing: PyPDF2, python-docx
 
-## Getting Started
+## 🚀 Getting Started (Local Development)
 
 ### Prerequisites
-* **Node.js** (v16 or higher) installed for the frontend.
-* **Python** (v3.8 or higher) installed for the backend.
+* Node.js (v18+)
+* Python (3.9+)
+* A Supabase project with `patients` and `conditions` tables uploaded. (Note: Row Level Security (RLS) must be disabled for the `anon` key for this MVP).
+* A Groq API Key.
 
-### 1. Backend Setup (FastAPI)
-Open a terminal and navigate to the `backend` directory:
-```bash
+### 1. Backend Setup
+Navigate to the backend directory:
 cd backend
-```
 
-Create and activate a virtual environment:
-* **Windows:** `python -m venv venv` then `.\venv\Scripts\activate`
-* **Mac/Linux:** `python3 -m venv venv` then `source venv/bin/activate`
+Create a virtual environment and install dependencies:
+python -m venv venv
+source venv/bin/activate  # On Windows use: venv\Scripts\activate
+pip install -r requirements.txt
 
-Install the required dependencies:
-```bash
-pip install fastapi uvicorn pydantic faker python-docx python-multipart PyPDF2
-```
+Create a .env file in the backend folder and add your credentials:
+GROQ_API_KEY="your_groq_api_key"
+SUPABASE_URL="your_supabase_project_url"
+SUPABASE_KEY="your_supabase_anon_public_key"
 
-Generate the mock PDF protocol files required for testing the upload feature:
-```bash
-python generate_pdfs.py
-```
+Start the FastAPI server:
+uvicorn main:app --reload
 
-Start the backend server:
-```bash
-python -m uvicorn main:app --reload
-```
-*The API will be live at `http://localhost:8000` and interactive API documentation will be available at `http://localhost:8000/docs`.*
-
-### 2. Frontend Setup (Next.js)
-Open a **new** terminal window and navigate to the `frontend` directory:
-```bash
+### 2. Frontend Setup
+Navigate to the frontend directory:
 cd frontend
-```
 
-Install the Node modules:
-```bash
+Install dependencies and start the development server:
 npm install
-```
-
-Start the development server:
-```bash
 npm run dev
-```
 
-Open your browser and navigate to `http://localhost:3000` to access the platform.
+Open http://localhost:3000 in your browser. Ensure the API_BASE variable in src/app/page.tsx points to your local backend (http://localhost:8000) during local testing.
 
----
+## ☁️ Deployment
+
+* Backend (Render): Deploy as a Web Service. Ensure the Build Command is `pip install -r requirements.txt` and the Start Command is `uvicorn main:app --host 0.0.0.0 --port $PORT`. Add the three environment variables to the Render dashboard.
+* Frontend (Vercel): Deploy via Vercel's zero-config Next.js integration. Update the API_BASE variable in page.tsx to point to your live Render URL before deploying.
+
+## ⚠️ Notes for Demo Environments
+* Geographic Fence: Patient data queries and site selection are explicitly fenced to 8 target US states (CA, NY, TX, FL, VA, MD, NC, DC) to ensure high-density visual rendering on the Heat-Grid based on the current synthetic dataset.
+* Cold Starts: If utilizing Render's free tier for the backend API, the service will sleep after 15 minutes of inactivity. Initial PDF parsing on a cold boot may take 30–50 seconds.
 
 ## About the Author
 
