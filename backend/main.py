@@ -81,6 +81,7 @@ STATE_ABBR_MAP = {
     "Massachusetts": "MA"
 }
 REVERSE_STATE_MAP = {v: k for k, v in STATE_ABBR_MAP.items()}
+DEMO_TARGET_STATES = ["CA", "NY", "TX", "FL", "VA", "MD", "NC", "DC"]
 
 # =====================================================================
 # FASTAPI ENDPOINTS
@@ -140,7 +141,7 @@ async def parse_protocol(file: UploadFile = File(...)):
             
         data["title"] = f"[Groq Extracted] {data.get('title', 'Unknown Title')}"
         if not data.get("geographies"):
-             data["geographies"] = ["VA", "MD", "DC", "CA", "NY", "TX", "NC", "FL"]
+             data["geographies"] = DEMO_TARGET_STATES
              
         return data
 
@@ -155,41 +156,50 @@ async def filter_participants(req: FilterRequest):
         raise HTTPException(status_code=500, detail="Supabase integration missing. Check environment variables.")
 
     try:
-        # Convert abbreviations (CA) to full names (California) for the Synthea DB
-        geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in req.protocol.geographies]
+        # FORCE GEOGRAPHIC FENCE: Always use our 8 demo states so the heatmap works beautifully
+        geos_full_names = [REVERSE_STATE_MAP.get(g, g) for g in DEMO_TARGET_STATES]
         
-        # 1. Live Supabase Query
-        response = supabase.table('patients').select('Id, STATE, GENDER, BIRTHDATE').in_('STATE', geos_full_names).execute()
+        # 1. Live Supabase Query (Using '*' to avoid case-sensitivity column crashes)
+        response = supabase.table('patients').select('*').in_('state', geos_full_names).execute()
+        
+        # If the lowercase 'state' failed, fallback to uppercase 'STATE' just in case
+        if len(response.data) == 0:
+            response = supabase.table('patients').select('*').in_('STATE', geos_full_names).execute()
+
         raw_patients = response.data
 
         # 2. Local Age Processing & Re-mapping abbreviations
-        site_counts = {state: 0 for state in req.protocol.geographies}
+        site_counts = {state: 0 for state in DEMO_TARGET_STATES}
         eligible_patients = []
         criteria = req.protocol.structured_criteria
 
         current_year = datetime.now().year
 
         for pt in raw_patients:
+            # Case-insensitive dictionary lookups for Supabase columns
+            pt_state = pt.get('state') or pt.get('STATE') or ''
+            pt_gender = pt.get('gender') or pt.get('GENDER') or 'U'
+            pt_birthdate = pt.get('birthdate') or pt.get('BIRTHDATE') or ''
+            pt_id = pt.get('id') or pt.get('Id') or pt.get('ID')
+
             try:
-                # Synthea dates are YYYY-MM-DD
-                birth_year = int(pt['BIRTHDATE'][:4])
+                birth_year = int(pt_birthdate[:4])
                 age = current_year - birth_year
             except:
-                age = 45 # Fallback if parsing fails
+                age = 45 # Fallback
 
             if criteria.age_min and age < criteria.age_min: continue
             if criteria.age_max and age > criteria.age_max: continue
 
-            # Map the full state name back to abbreviation for the frontend Map component
-            pt_state_abbr = STATE_ABBR_MAP.get(pt['STATE'], pt['STATE'])
+            pt_state_abbr = STATE_ABBR_MAP.get(pt_state, pt_state)
             
-            eligible_patients.append({
-                "patient_id": pt["Id"],
-                "demographics": {"age": age, "gender": pt["GENDER"]},
-                "location": {"state": pt_state_abbr}
-            })
-            
+            # Only count them if they are in our target states
             if pt_state_abbr in site_counts:
+                eligible_patients.append({
+                    "patient_id": pt_id,
+                    "demographics": {"age": age, "gender": pt_gender},
+                    "location": {"state": pt_state_abbr}
+                })
                 site_counts[pt_state_abbr] += 1
 
         return {
@@ -208,7 +218,7 @@ async def rank_sites(req: SiteRankingRequest):
         if not client: raise HTTPException(status_code=500, detail="Groq API Key missing.")
         
         # 1. LIVE API PING: Fetch real hospitals from clinicaltrials.gov
-        url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={req.protocol.indication}&pageSize=50"
+        url = f"https://clinicaltrials.gov/api/v2/studies?query.cond={req.protocol.indication}&pageSize=100"
         ct_response = requests.get(url).json()
         
         real_sites = []
@@ -217,13 +227,23 @@ async def rank_sites(req: SiteRankingRequest):
         for study in ct_response.get("studies", []):
             locations = study.get("protocolSection", {}).get("contactsLocationsModule", {}).get("locations", [])
             for loc in locations:
+                # GEOGRAPHIC FENCE: Strictly filter for United States
+                country = loc.get("country", "")
+                if country != "United States":
+                    continue
+
                 name = loc.get("facility", "")
                 if not name or name in seen_names: continue
-                seen_names.add(name)
                 
                 # Format to our schema
                 state_raw = loc.get("state", "")
-                state_abbr = STATE_ABBR_MAP.get(state_raw, state_raw) # Standardize to CA, NY, etc.
+                state_abbr = STATE_ABBR_MAP.get(state_raw, state_raw) 
+
+                # GEOGRAPHIC FENCE: Only include sites in our 8 target states so they hit the heatmap!
+                if state_abbr not in DEMO_TARGET_STATES:
+                    continue
+
+                seen_names.add(name)
 
                 real_sites.append({
                     "site_id": f"CT-{len(real_sites)+1000}",
@@ -242,10 +262,18 @@ async def rank_sites(req: SiteRankingRequest):
                     "capabilities": {"has_trial_experience": True, "staff_count": random.randint(10, 80)}
                 })
 
+        # Fallback just in case CT.gov returns zero US matches for a weird indication
         if not real_sites:
-            raise ValueError(f"No real-world sites found for indication: {req.protocol.indication}")
+            real_sites.append({
+                "site_id": "CT-FALLBACK", "npi": "1234567890", "name": "Mayo Clinic (Demo Fallback)",
+                "organization_type": "Research Institution", "specialty": req.protocol.indication.title(),
+                "location": {"city": "Jacksonville", "state": "FL", "zip": "32224"},
+                "therapeutic_areas": [req.protocol.indication.lower()],
+                "metrics": {"past_enrollment_rate": 12.5, "activation_time_days": 45, "patient_pool_size": 5000, "performance_score": 0.0},
+                "capabilities": {"has_trial_experience": True, "staff_count": 45}
+            })
 
-        db_sites = real_sites # Update our global cache for the Simulation/Doc generation steps
+        db_sites = real_sites 
 
         # 2. AI RANKING
         compressed = [{"id": s["site_id"], "state": s["location"]["state"], "rate": s["metrics"]["past_enrollment_rate"]} for s in db_sites[:30]]
@@ -255,7 +283,7 @@ async def rank_sites(req: SiteRankingRequest):
         {"top_sites": [{"site_id": "string", "score": <float 0.0-1.0>, "breakdown": {"enrollment_rate_component": <float>, "patient_availability_component": <float>, "therapeutic_match_component": <float>, "geography_match_component": <float>}}]}
         """
 
-        user_prompt = f"Target Indication: {req.protocol.indication}\nGeographies: {req.protocol.geographies}\nSites: {json.dumps(compressed)}"
+        user_prompt = f"Target Indication: {req.protocol.indication}\nGeographies: {DEMO_TARGET_STATES}\nSites: {json.dumps(compressed)}"
 
         chat = client.chat.completions.create(
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
