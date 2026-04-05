@@ -275,7 +275,20 @@ export default function Home() {
                               const opacity = patientCount > 0 ? 0.2 + (0.8 * (patientCount / maxPatients)) : 0;
                               const fill = patientCount > 0 ? `rgba(79, 70, 229, ${opacity})` : "#F3F4F6";
 
-                              return <Geography key={geo.rsmKey} geography={geo} fill={fill} stroke="#D1D5DB" strokeWidth={0.5} />;
+                              return (
+                                <Geography 
+                                  key={geo.rsmKey} 
+                                  geography={geo} 
+                                  /* CRITICAL FIX: react-simple-maps overrides raw fill attributes. We must use the style prop! */
+                                  style={{
+                                    default: { fill: fill, outline: "none", transition: "all 250ms" },
+                                    hover: { fill: patientCount > 0 ? "#4338CA" : "#D1D5DB", outline: "none", cursor: "pointer", transition: "all 250ms" },
+                                    pressed: { fill: "#3730A3", outline: "none" }
+                                  }}
+                                  stroke="#D1D5DB" 
+                                  strokeWidth={0.5} 
+                                />
+                              );
                             })
                           }
                         </Geographies>
